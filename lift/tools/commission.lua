@@ -1,5 +1,5 @@
 -- ============================================================
--- RuffHouse Lift Commissioning Tool v3.3
+-- RuffHouse Lift Commissioning Tool v3.4
 --
 -- Commissions:
 --   1. Floor monitor
@@ -21,6 +21,11 @@ local FLOOR_COUNT = 6
 
 local ARRIVAL_HOLD_TIME = 1.0
 local POLL_INTERVAL = 0.05
+
+local TEST_NOTE_INTERVAL = 0.6
+local TEST_NOTE_INSTRUMENT = "pling"
+local TEST_NOTE_VOLUME = 1
+local TEST_NOTE_PITCH = 12
 
 local CONFIG_PATH = "/lift/config.lua"
 
@@ -157,40 +162,53 @@ local function drawMapped(monitor, floor)
     )
 end
 
-local function drawSpeakerTest(monitor, floor)
-    drawFloorTitle(monitor, floor)
+local function drawSpeakerTest(
+    monitor,
+    floor,
+    speakerName
+)
+    prepareMonitor(monitor)
 
-    local width, height = monitor.getSize()
+    local width, height =
+        monitor.getSize()
 
     centeredText(
         monitor,
-        math.floor(height / 2),
+        2,
+        "FLOOR " .. floor,
+        colors.white
+    )
+
+    centeredText(
+        monitor,
+        4,
         "SPEAKER TEST",
         colors.orange
     )
 
-    monitor.setTextColor(colors.red)
-
-    monitor.setCursorPos(
-        2,
-        math.min(
-            height,
-            math.floor(height / 2) + 2
-        )
+    centeredText(
+        monitor,
+        6,
+        speakerName,
+        colors.lightGray
     )
 
-    monitor.write("NO")
+    -- Bottom controls
 
-    monitor.setTextColor(colors.lime)
+    monitor.setTextColor(colors.red)
+    monitor.setCursorPos(2, height)
+    monitor.write("NO")
 
     local yesText = "YES"
 
+    monitor.setTextColor(colors.lime)
+
     monitor.setCursorPos(
-        math.max(1, width - #yesText),
-        math.min(
-            height,
-            math.floor(height / 2) + 2
-        )
+        math.max(
+            1,
+            width - #yesText
+        ),
+        height
     )
 
     monitor.write(yesText)
@@ -341,21 +359,188 @@ local assignedSpeakers = {}
 local assignedRelays = {}
 
 -- ============================================================
--- SPEAKER HELPERS
+-- SPEAKER TEST
+--
+-- Known-good Mk1 behaviour:
+-- only the speaker currently being tested is stopped.
 -- ============================================================
 
-local function stopAllSpeakers()
-    for _, name in ipairs(speakers) do
+local function testSpeaker(
+    floor,
+    monitorName,
+    speakerName
+)
 
-        local speaker =
-            peripheral.wrap(name)
+    local monitor =
+        peripheral.wrap(monitorName)
 
-        if speaker then
-            pcall(function()
-                speaker.stop()
-            end)
+    local speaker =
+        peripheral.wrap(speakerName)
+
+    if not monitor then
+        error(
+            "Unable to wrap monitor "
+            .. tostring(monitorName)
+        )
+    end
+
+    if not speaker then
+        error(
+            "Unable to wrap speaker "
+            .. tostring(speakerName)
+        )
+    end
+
+    drawSpeakerTest(
+        monitor,
+        floor,
+        speakerName
+    )
+
+    local decision = nil
+
+    -- Repeatedly play THIS speaker.
+
+    local function soundLoop()
+
+        while decision == nil do
+
+            speaker.playNote(
+                TEST_NOTE_INSTRUMENT,
+                TEST_NOTE_VOLUME,
+                TEST_NOTE_PITCH
+            )
+
+            sleep(TEST_NOTE_INTERVAL)
         end
     end
+
+    -- Wait for YES / NO on THIS floor's monitor.
+
+    local function touchLoop()
+
+        while decision == nil do
+
+            local _,
+                  touchedMonitor,
+                  x =
+                os.pullEvent(
+                    "monitor_touch"
+                )
+
+            if touchedMonitor
+                == monitorName then
+
+                local width, _ =
+                    monitor.getSize()
+
+                if x
+                    <= math.floor(
+                        width / 2
+                    ) then
+
+                    decision = false
+
+                else
+
+                    decision = true
+                end
+
+                return
+            end
+        end
+    end
+
+    parallel.waitForAny(
+        soundLoop,
+        touchLoop
+    )
+
+    -- ONLY stop the speaker which was just tested.
+
+    speaker.stop()
+
+    return decision
+end
+
+-- ============================================================
+-- SPEAKER COMMISSIONING
+-- ============================================================
+
+local function commissionSpeaker(
+    floor,
+    monitorName
+)
+
+    header(
+        "Floor "
+        .. floor
+        .. " - Speaker"
+    )
+
+    print(
+        "Use the Floor "
+        .. floor
+        .. " monitor."
+    )
+
+    print()
+    print("A speaker will repeatedly")
+    print("play a test tone.")
+    print()
+    print("Tap:")
+    print("  LEFT  = wrong speaker")
+    print("  RIGHT = correct speaker")
+    print()
+
+    for _, speakerName
+        in ipairs(speakers) do
+
+        if not assignedSpeakers[speakerName] then
+
+            print(
+                "Testing: "
+                .. speakerName
+            )
+
+            local correct =
+                testSpeaker(
+                    floor,
+                    monitorName,
+                    speakerName
+                )
+
+            if correct then
+
+                assignedSpeakers[speakerName] =
+                    true
+
+                local monitor =
+                    peripheral.wrap(
+                        monitorName
+                    )
+
+                if monitor then
+
+                    drawSpeakerMapped(
+                        monitor,
+                        floor
+                    )
+                end
+
+                return speakerName
+            end
+
+            print(
+                "Wrong speaker, trying next..."
+            )
+        end
+    end
+
+    error(
+        "No speaker assigned to Floor "
+        .. floor
+    )
 end
 
 -- ============================================================
@@ -371,7 +556,6 @@ end
 -- Floor 2 speaker
 -- ...
 --
--- This preserves the original physical commissioning workflow.
 -- ============================================================
 
 for floor = 1, FLOOR_COUNT do
@@ -406,6 +590,7 @@ for floor = 1, FLOOR_COUNT do
                 peripheral.wrap(name)
 
             if monitor then
+
                 drawTapToMap(
                     monitor,
                     floor
@@ -414,46 +599,68 @@ for floor = 1, FLOOR_COUNT do
         end
     end
 
+    local monitorName = nil
+
     while true do
 
         local _,
-              monitorName =
-            os.pullEvent("monitor_touch")
+              touchedMonitor =
+            os.pullEvent(
+                "monitor_touch"
+            )
 
-        if peripheral.getType(monitorName)
-            == "monitor" then
+        if peripheral.getType(
+            touchedMonitor
+        ) == "monitor" then
 
-            if assignedMonitors[monitorName] then
+            if assignedMonitors[
+                touchedMonitor
+            ] then
 
-                term.setTextColor(colors.red)
+                term.setTextColor(
+                    colors.red
+                )
 
                 print()
                 print(
-                    monitorName
+                    touchedMonitor
                     .. " is already assigned."
                 )
 
-                term.setTextColor(colors.white)
+                term.setTextColor(
+                    colors.white
+                )
 
             else
 
-                config.floors[floor].monitor =
+                monitorName =
+                    touchedMonitor
+
+                config.floors[
+                    floor
+                ].monitor =
                     monitorName
 
-                assignedMonitors[monitorName] =
-                    true
+                assignedMonitors[
+                    monitorName
+                ] = true
 
                 local monitor =
-                    peripheral.wrap(monitorName)
+                    peripheral.wrap(
+                        monitorName
+                    )
 
                 if monitor then
+
                     drawMapped(
                         monitor,
                         floor
                     )
                 end
 
-                term.setTextColor(colors.lime)
+                term.setTextColor(
+                    colors.lime
+                )
 
                 print()
                 print(
@@ -463,7 +670,9 @@ for floor = 1, FLOOR_COUNT do
                     .. monitorName
                 )
 
-                term.setTextColor(colors.white)
+                term.setTextColor(
+                    colors.white
+                )
 
                 sleep(0.5)
 
@@ -476,144 +685,16 @@ for floor = 1, FLOOR_COUNT do
     -- SPEAKER
     -- ========================================================
 
-    local monitorName =
-        config.floors[floor].monitor
-
-    local monitor =
-        peripheral.wrap(monitorName)
-
-    local candidates = {}
-
-    for _, name in ipairs(speakers) do
-
-        if not assignedSpeakers[name] then
-
-            candidates[#candidates + 1] =
-                name
-        end
-    end
-
-    local selected = nil
-
-    for _, candidate in ipairs(candidates) do
-
-        header(
-            "Floor "
-            .. floor
-            .. " - Speaker"
+    local speakerName =
+        commissionSpeaker(
+            floor,
+            monitorName
         )
 
-        print("Testing:")
-        print(candidate)
-
-        print()
-        print(
-            "Use the Floor "
-            .. floor
-            .. " monitor."
-        )
-
-        if monitor then
-            drawSpeakerTest(
-                monitor,
-                floor
-            )
-        end
-
-        local speaker =
-            peripheral.wrap(candidate)
-
-        local function soundLoop()
-
-            while true do
-
-                if speaker then
-
-                    speaker.playNote(
-                        "pling",
-                        1,
-                        12
-                    )
-                end
-
-                sleep(0.6)
-            end
-        end
-
-        local function touchLoop()
-
-            while true do
-
-                local _,
-                      touchedMonitor,
-                      x =
-                    os.pullEvent(
-                        "monitor_touch"
-                    )
-
-                if touchedMonitor
-                    == monitorName then
-
-                    local width, _ =
-                        monitor.getSize()
-
-                    -- Left half = NO
-                    -- Right half = YES
-
-                    if x <= width / 2 then
-                        return false
-                    else
-                        selected = candidate
-                        return true
-                    end
-                end
-            end
-        end
-
-        parallel.waitForAny(
-            soundLoop,
-            touchLoop
-        )
-
-        stopAllSpeakers()
-
-        if selected then
-            break
-        end
-    end
-
-    if not selected then
-
-        header(
-            "Speaker Commissioning Failed"
-        )
-
-        term.setTextColor(colors.red)
-
-        print(
-            "No speaker selected for Floor "
-            .. floor
-            .. "."
-        )
-
-        term.setTextColor(colors.white)
-
-        return
-    end
-
-    config.floors[floor].speaker =
-        selected
-
-    assignedSpeakers[selected] =
-        true
-
-    if monitor then
-
-        drawSpeakerMapped(
-            monitor,
-            floor
-        )
-    end
+    config.floors[
+        floor
+    ].speaker =
+        speakerName
 
     sleep(0.5)
 end
@@ -640,12 +721,16 @@ local function relayActive(name)
         return false
     end
 
-    for _, side in ipairs(relaySides) do
+    for _, side
+        in ipairs(relaySides) do
 
         local ok,
               value =
             pcall(function()
-                return relay.getInput(side)
+
+                return relay.getInput(
+                    side
+                )
             end)
 
         if ok and value then
@@ -718,7 +803,9 @@ for floor = 1, FLOOR_COUNT do
     term.setTextColor(colors.yellow)
 
     print()
-    print("Press ENTER after calling lift.")
+    print(
+        "Press ENTER after calling lift."
+    )
 
     term.setTextColor(colors.white)
 
@@ -822,7 +909,8 @@ for floor = 1, FLOOR_COUNT do
                             colors.white
                         )
 
-                        activeSince[name] = nil
+                        activeSince[name] =
+                            nil
                     end
                 end
             end
@@ -844,7 +932,9 @@ for floor = 1, FLOOR_COUNT do
     assignedRelays[accepted] =
         true
 
-    config.floors[floor].statusRelay =
+    config.floors[
+        floor
+    ].statusRelay =
         accepted
 
     term.setTextColor(colors.lime)
@@ -990,7 +1080,9 @@ for floor = 1, FLOOR_COUNT do
 
     local monitor =
         peripheral.wrap(
-            config.floors[floor].monitor
+            config.floors[
+                floor
+            ].monitor
         )
 
     if monitor then
