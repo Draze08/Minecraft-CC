@@ -1,10 +1,9 @@
 -- ============================================================
 -- RuffHouse Minecraft-CC Installer / Updater
--- FEATURE BRANCH: create-liftlink
 -- ============================================================
 
 local BASE_URL =
-    "https://raw.githubusercontent.com/Draze08/Minecraft-CC/refs/heads/feature/create-liftlink/"
+    "https://raw.githubusercontent.com/Draze08/Minecraft-CC/refs/heads/main/"
 
 local files = {
     {
@@ -83,6 +82,53 @@ local function downloadFile(remote, localPath)
     return true
 end
 
+local function installStartup()
+    local startupPath = "/startup.lua"
+    local startupContents = [[if fs.exists("/lift/controller.lua") then
+    shell.run("/lift/controller.lua")
+else
+    print("Lift controller not installed.")
+end
+]]
+
+    local existing = nil
+    if fs.exists(startupPath) then
+        local file = fs.open(startupPath, "r")
+        if file then
+            existing = file.readAll()
+            file.close()
+        end
+    end
+
+    if existing == startupContents then
+        print("Startup: already configured")
+        return true
+    end
+
+    if existing and existing ~= "" then
+        local backupPath = "/startup.lua.pre-lift"
+        if not fs.exists(backupPath) then
+            local backup = fs.open(backupPath, "w")
+            if not backup then
+                return false, "Could not back up existing startup.lua"
+            end
+            backup.write(existing)
+            backup.close()
+            print("Existing startup.lua backed up to " .. backupPath)
+        end
+    end
+
+    local file = fs.open(startupPath, "w")
+    if not file then
+        return false, "Could not write startup.lua"
+    end
+
+    file.write(startupContents)
+    file.close()
+    print("Startup: /lift/controller.lua enabled")
+    return true
+end
+
 -- ------------------------------------------------------------
 -- Header
 -- ------------------------------------------------------------
@@ -93,7 +139,7 @@ term.setCursorPos(1, 1)
 print("RuffHouse Minecraft-CC Updater")
 print("==============================")
 print()
-print("Source: feature/create-liftlink")
+print("Source: main")
 print()
 
 -- ------------------------------------------------------------
@@ -151,6 +197,17 @@ end
 -- for this particular lift shaft.
 -- ------------------------------------------------------------
 
+-- ------------------------------------------------------------
+-- Configure automatic controller startup
+-- ------------------------------------------------------------
+
+local startupSuccess, startupErr = installStartup()
+if not startupSuccess then
+    print("Startup: FAILED")
+    print("  " .. tostring(startupErr))
+    failed = failed + 1
+end
+
 print()
 print("==============================")
 
@@ -175,6 +232,7 @@ else
 end
 
 print()
-print("Run:")
+print("Controller will start automatically on reboot.")
+print("Run now:")
 print("  /lift/controller.lua")
 print()
