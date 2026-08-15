@@ -1,5 +1,5 @@
 -- ============================================================
--- RuffHouse Lift Controller v5
+-- RuffHouse Lift Controller v6
 -- REAL LIFT STATE / HMI + AUDIO
 --
 -- Display:
@@ -17,12 +17,23 @@
 --   Two-note bell on destination floor after movement stops
 --
 -- State input:
---   Floor redstone status relays commissioned in:
+--   Floor call + status relays commissioned in:
 --   /lift/config.lua
 --
--- Relay behaviour:
+--   CALL relay   = requested destination / movement intent
+--   STATUS relay = observed physical lift position
+--
+-- Status relay behaviour:
 --   SHORT activation     = lift passing floor
 --   SUSTAINED activation = lift stopped at floor
+--
+-- Call relay behaviour:
+--   Activation selects destination immediately.
+--   Direction is derived from current/last known floor to destination.
+--
+-- Shaft orientation:
+--   1 -> 6 = DOWN
+--   6 -> 1 = UP
 --
 -- The controller NEVER commands the lift.
 -- Physical call buttons remain entirely human controlled.
@@ -142,6 +153,15 @@ for floor = 1, FLOOR_COUNT do
     end
 
 
+    if not floorConfig.callRelay then
+
+        error(
+            "Missing call relay for Floor "
+            .. floor
+        )
+    end
+
+
     if not floorConfig.statusRelay then
 
         error(
@@ -166,6 +186,10 @@ local state = {
 
     direction = "stopped",
 
+    -- Destination selected by a physical call button.
+
+    destination = nil,
+
     animationFrame = 1,
 
     running = true,
@@ -178,8 +202,6 @@ local state = {
     positionKnown = false,
 
     -- Last floor observed through a pass or arrival event.
-    --
-    -- Used to infer direction.
 
     lastObservedFloor = nil
 }
@@ -217,6 +239,22 @@ local function getSpeaker(floor)
 
     return peripheral.wrap(
         floorConfig.speaker
+    )
+end
+
+
+local function getCallRelay(floor)
+
+    local floorConfig =
+        config.floors[floor]
+
+    if not floorConfig
+    or not floorConfig.callRelay then
+        return nil
+    end
+
+    return peripheral.wrap(
+        floorConfig.callRelay
     )
 end
 
@@ -625,7 +663,7 @@ local function drawTerminal()
 
 
     print(
-        "RuffHouse Lift Controller v5"
+        "RuffHouse Lift Controller v6"
     )
 
     print(
@@ -663,6 +701,18 @@ local function drawTerminal()
         )
     )
 
+    if state.destination then
+
+        print(
+            "Destination: "
+            .. tostring(state.destination)
+        )
+
+    else
+
+        print("Destination: NONE")
+    end
+
 
     print()
 
@@ -699,7 +749,7 @@ local function drawTerminal()
 
     print()
 
-    print("REAL STATUS MODE")
+    print("CALL + STATUS MODE")
     print("----------------")
     print()
 
@@ -714,11 +764,15 @@ local function drawTerminal()
     print()
 
     print(
-        "Lift movement is observed only."
+        "Call relays provide destination intent."
     )
 
     print(
-        "Physical call buttons control lift."
+        "Status relays provide physical position."
+    )
+
+    print(
+        "Controller observes only; buttons control lift."
     )
 
     print()
@@ -757,7 +811,7 @@ local function startMovement(direction)
     -- Do not restart movement state if we're already moving
     -- in the same direction.
     --
-    -- This prevents every passing-floor pulse from restarting
+    -- This prevents duplicate call events from restarting
     -- the SAG sound.
 
     if state.direction == direction then
@@ -829,6 +883,7 @@ local function arrive(floor)
     state.positionKnown = true
 
     state.direction = "stopped"
+    state.destination = nil
     state.animationFrame = 1
 
     state.lastObservedFloor =
@@ -857,11 +912,7 @@ local RELAY_SIDES = {
 }
 
 
-local function relayActive(floor)
-
-    local relay =
-        getStatusRelay(floor)
-
+local function peripheralRelayActive(relay)
 
     if not relay then
         return false
@@ -889,21 +940,49 @@ local function relayActive(floor)
 end
 
 
+local function statusRelayActive(floor)
+
+    return peripheralRelayActive(
+        getStatusRelay(floor)
+    )
+end
+
+
+local function callRelayActive(floor)
+
+    return peripheralRelayActive(
+        getCallRelay(floor)
+    )
+end
+
+
 -- ============================================================
--- INFER MOVEMENT DIRECTION
+-- MOVEMENT DIRECTION FROM DESTINATION INTENT
+--
+-- IMPORTANT:
+-- Shaft numbering is physically inverted relative to the words:
+--
+--   1 -> 6 = DOWN
+--   6 -> 1 = UP
+--
+-- Direction is therefore established immediately from the
+-- current/last known physical floor and the call destination.
 -- ============================================================
 
-local function inferDirection(newFloor)
+local function directionToDestination(destination)
 
-    local referenceFloor =
-        state.lastObservedFloor
+    local referenceFloor = nil
 
 
-    if referenceFloor == nil
-    and state.positionKnown then
+    if state.positionKnown then
 
         referenceFloor =
             state.floor
+
+    elseif state.lastObservedFloor then
+
+        referenceFloor =
+            state.lastObservedFloor
     end
 
 
@@ -912,13 +991,13 @@ local function inferDirection(newFloor)
     end
 
 
-    if newFloor > referenceFloor then
-
-        return "up"
-
-    elseif newFloor < referenceFloor then
+    if destination > referenceFloor then
 
         return "down"
+
+    elseif destination < referenceFloor then
+
+        return "up"
     end
 
 
@@ -927,40 +1006,84 @@ end
 
 
 -- ============================================================
--- PASS EVENT
+-- CALL EVENT
 --
--- Called when a relay activates but releases BEFORE the
--- sustained-arrival threshold.
+-- A physical landing button has selected a destination.
+-- This is intent only. The controller does NOT command the lift.
 -- ============================================================
 
-local function handlePass(floor)
+local function handleCall(destination)
 
-    local direction =
-        inferDirection(floor)
-
-
-    -- --------------------------------------------------------
-    -- If this is the first floor transition away from a known
-    -- stopped floor, this establishes movement direction.
-    -- --------------------------------------------------------
-
-    if direction then
-
-        if state.direction ~= direction then
-
-            startMovement(direction)
-        end
+    if destination < 1
+    or destination > FLOOR_COUNT then
+        return
     end
 
 
-    -- The floor number follows the latest floor actually
-    -- observed by the lift.
+    state.destination =
+        destination
+
+
+    local direction =
+        directionToDestination(
+            destination
+        )
+
+
+    if direction then
+
+        startMovement(direction)
+
+    else
+
+        -- Same-floor call, or position not yet known.
+        --
+        -- If position is unknown we retain the destination and
+        -- let status observations establish physical position.
+
+        refreshDisplays()
+        drawTerminal()
+    end
+end
+
+
+-- ============================================================
+-- PASS EVENT
+--
+-- Status relay released before the sustained-arrival threshold.
+--
+-- Direction is NOT inferred here anymore. Call relays already
+-- gave us destination intent before movement began.
+--
+-- Passing status relays only update actual observed position.
+-- ============================================================
+
+local function handlePass(floor)
 
     state.floor = floor
     state.positionKnown = true
 
     state.lastObservedFloor =
         floor
+
+
+    -- If the controller started with unknown position but a call
+    -- destination was already captured, the first observed status
+    -- floor now gives us enough information to establish direction.
+
+    if state.direction == "stopped"
+    and state.destination then
+
+        local direction =
+            directionToDestination(
+                state.destination
+            )
+
+        if direction then
+            startMovement(direction)
+            return
+        end
+    end
 
 
     refreshDisplays()
@@ -987,7 +1110,7 @@ local function initialisePosition()
 
     for floor = 1, FLOOR_COUNT do
 
-        if relayActive(floor) then
+        if statusRelayActive(floor) then
 
             table.insert(
                 activeFloors,
@@ -1036,26 +1159,15 @@ end
 local function stateLoop()
 
     -- --------------------------------------------------------
-    -- Per-floor relay state.
-    --
-    -- activeSince:
-    --   Time at which a NEW activation began.
-    --
-    -- handledArrival:
-    --   Prevents a sustained HIGH relay from repeatedly
-    --   generating arrival events.
-    --
-    -- ignoreUntilLow:
-    --   Used for the relay which was already HIGH when the
-    --   controller started.
+    -- Per-floor STATUS relay state.
     -- --------------------------------------------------------
 
-    local relayState = {}
+    local statusState = {}
 
 
     for floor = 1, FLOOR_COUNT do
 
-        relayState[floor] = {
+        statusState[floor] = {
 
             wasActive = false,
 
@@ -1069,7 +1181,26 @@ local function stateLoop()
 
 
     -- --------------------------------------------------------
-    -- Establish startup state.
+    -- Per-floor CALL relay edge state.
+    --
+    -- Calls are handled on their rising edge only.
+    -- --------------------------------------------------------
+
+    local callState = {}
+
+
+    for floor = 1, FLOOR_COUNT do
+
+        callState[floor] = {
+
+            wasActive =
+                callRelayActive(floor)
+        }
+    end
+
+
+    -- --------------------------------------------------------
+    -- Establish startup physical position from STATUS only.
     -- --------------------------------------------------------
 
     local initialFloor =
@@ -1078,11 +1209,11 @@ local function stateLoop()
 
     if initialFloor then
 
-        relayState[
+        statusState[
             initialFloor
         ].wasActive = true
 
-        relayState[
+        statusState[
             initialFloor
         ].ignoreUntilLow = true
     end
@@ -1093,23 +1224,56 @@ local function stateLoop()
 
 
     -- --------------------------------------------------------
-    -- Watch all six commissioned status relays.
+    -- Watch both commissioned relay banks.
     -- --------------------------------------------------------
 
     while state.running do
 
+        -- ====================================================
+        -- CALL RELAYS
+        -- ====================================================
+
+        for floor = 1, FLOOR_COUNT do
+
+            local cs =
+                callState[floor]
+
+            local active =
+                callRelayActive(floor)
+
+
+            if active
+            and not cs.wasActive then
+
+                cs.wasActive = true
+
+                handleCall(floor)
+
+
+            elseif not active
+            and cs.wasActive then
+
+                cs.wasActive = false
+            end
+        end
+
+
+        -- ====================================================
+        -- STATUS RELAYS
+        -- ====================================================
+
         for floor = 1, FLOOR_COUNT do
 
             local rs =
-                relayState[floor]
+                statusState[floor]
 
 
             local active =
-                relayActive(floor)
+                statusRelayActive(floor)
 
 
             -- =================================================
-            -- RELAY WENT HIGH
+            -- STATUS RELAY WENT HIGH
             -- =================================================
 
             if active
@@ -1126,19 +1290,16 @@ local function stateLoop()
 
 
             -- =================================================
-            -- RELAY IS HIGH
+            -- STATUS RELAY IS HIGH
             -- =================================================
 
             if active then
 
                 if rs.ignoreUntilLow then
 
-                    -- This was already HIGH when the
-                    -- controller booted.
-                    --
-                    -- It established our initial parked
-                    -- position and must NOT generate a fake
-                    -- arrival event.
+                    -- Startup parked-floor relay.
+                    -- It established initial position and must
+                    -- not generate a fake arrival.
 
                 elseif rs.activeSince
                 and not rs.handledArrival then
@@ -1155,12 +1316,6 @@ local function stateLoop()
                             true
 
 
-                        -- Was the lift actually moving before
-                        -- this sustained signal?
-                        --
-                        -- Only genuine movement gets an
-                        -- arrival chime.
-
                         local wasMoving =
                             state.direction
                             ~= "stopped"
@@ -1173,22 +1328,23 @@ local function stateLoop()
                             floor
 
 
+                        -- A sustained status signal is authoritative
+                        -- physical arrival. If we had a destination,
+                        -- it is now complete.
+
                         if wasMoving then
 
                             arrive(floor)
 
                         else
 
-                            -- We discovered a stopped floor
-                            -- without previously observing
-                            -- movement.
-                            --
-                            -- Update state quietly.
-
                             stopAllSpeakers()
 
                             state.direction =
                                 "stopped"
+
+                            state.destination =
+                                nil
 
                             state.animationFrame =
                                 1
@@ -1201,30 +1357,18 @@ local function stateLoop()
 
 
             -- =================================================
-            -- RELAY IS LOW
+            -- STATUS RELAY IS LOW
             -- =================================================
 
             else
 
                 if rs.wasActive then
 
-                    -- -----------------------------------------
-                    -- Startup parked relay has finally
-                    -- released.
-                    --
-                    -- This is departure from the initial
-                    -- floor, NOT a pass event.
-                    -- -----------------------------------------
-
                     if rs.ignoreUntilLow then
 
                         rs.ignoreUntilLow =
                             false
 
-
-                    -- -----------------------------------------
-                    -- Normal activation released.
-                    -- -----------------------------------------
 
                     elseif rs.activeSince
                     and not rs.handledArrival then
@@ -1233,10 +1377,6 @@ local function stateLoop()
                             os.clock()
                             - rs.activeSince
 
-
-                        -- Released before arrival threshold.
-                        --
-                        -- Therefore this was a pass-by.
 
                         if duration
                             < ARRIVAL_HOLD_TIME then
@@ -1411,7 +1551,7 @@ clearTerminal()
 
 
 print(
-    "RuffHouse Lift Controller v5"
+    "RuffHouse Lift Controller v6"
 )
 
 print(
