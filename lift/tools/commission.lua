@@ -1,5 +1,5 @@
 -- ============================================================
--- RuffHouse Lift Commissioning Tool v1.4
+-- RuffHouse Lift Commissioning Tool v1.5
 -- CC:Tweaked
 --
 -- Configures:
@@ -418,6 +418,7 @@ end
 -- ============================================================
 -- REDSTONE STATUS COMMISSIONING
 -- New in V1.4
+-- V1.5 removes manual ENTER arming
 -- ============================================================
 
 local RELAY_SIDES = {
@@ -513,8 +514,6 @@ local function commissionStatusRelay(
     print("Push the physical Floor " .. floor)
     print("call button.")
     print()
-    print("Then press ENTER here.")
-    print()
     print(
         "Signals under "
         .. ARRIVAL_HOLD_TIME
@@ -531,33 +530,22 @@ local function commissionStatusRelay(
     )
 
 
-    -- Arm detection after the user has called the lift.
-
-    while true do
-
-        local _, key =
-            os.pullEvent("key")
-
-        if key == keys.enter then
-            break
-        end
-    end
-
-
-    drawStatusPrompt(
-        mon,
-        floor,
-        "WAITING FOR LIFT",
-        colors.orange
-    )
-
+    -- ========================================================
+    -- Detection is LIVE immediately.
+    --
+    -- The physical call button is not connected to CC.
+    -- CC therefore does not wait for or detect the button.
+    --
+    -- Instead, it watches all currently-unassigned status
+    -- relays from this point onward.
+    --
+    -- Short HIGH  = passing floor
+    -- Sustained HIGH = arrived/stopped floor
+    -- ========================================================
 
     print("Watching status relays...")
     print()
 
-
-    -- Tracks when each currently-unassigned relay first
-    -- becomes active.
 
     local activeSince = {}
 
@@ -582,6 +570,8 @@ local function commissionStatusRelay(
 
 
                 if active then
+
+                    -- First observation of HIGH.
 
                     if not activeSince[relayName] then
 
@@ -658,6 +648,10 @@ local function commissionStatusRelay(
         end
     end
 
+
+    -- ========================================================
+    -- Arrival confirmed
+    -- ========================================================
 
     assignedRelays[acceptedRelay] = true
 
@@ -792,7 +786,6 @@ local monitorNames =
 local speakerNames =
     discoverPeripheralType("speaker")
 
--- New in V1.4
 local relayNames =
     discoverPeripheralType("redstone_relay")
 
@@ -875,8 +868,6 @@ if #speakerNames ~= FLOOR_COUNT then
 end
 
 
--- New validation only
-
 if #relayNames ~= FLOOR_COUNT then
 
     print("ERROR")
@@ -905,7 +896,7 @@ sleep(1.5)
 -- ============================================================
 -- Commission floors
 --
--- THIS IS THE V1.3 WORKFLOW:
+-- V1.3 workflow preserved:
 --
 -- F1 monitor -> F1 speaker
 -- F2 monitor -> F2 speaker
@@ -978,10 +969,9 @@ end
 
 
 -- ============================================================
--- NEW: Commission floor status relays
+-- Commission floor status relays
 --
--- This happens only AFTER the original V1.3 monitor/speaker
--- commissioning has completed.
+-- Runs only AFTER the known-good V1.3 monitor/speaker pass.
 -- ============================================================
 
 local assignedRelays = {}
