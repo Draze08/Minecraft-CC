@@ -126,14 +126,18 @@ local function getFloorLongName(floor)
 end
 
 local function getArrowRows(direction, frame)
+    -- CC:LiftLink reports this shaft's motion direction opposite
+    -- to the visual direction required by the landing HMI.
+    -- Intentionally invert the chevrons only. Do not alter state,
+    -- routing, audio, config or movement logic.
     if direction == "up" then
-        if frame == 1 then return { " ", "^", " " }
-        elseif frame == 2 then return { "^", "^", " " }
-        else return { "^", " ", "^" } end
-    elseif direction == "down" then
         if frame == 1 then return { " ", "v", " " }
         elseif frame == 2 then return { " ", "v", "v" }
         else return { "v", " ", "v" } end
+    elseif direction == "down" then
+        if frame == 1 then return { " ", "^", " " }
+        elseif frame == 2 then return { "^", "^", " " }
+        else return { "^", " ", "^" } end
     end
     return { " ", " ", " " }
 end
@@ -317,11 +321,6 @@ local function floorFromY(y)
     if type(y) ~= "number" then return nil end
     return createFloorByY[y]
 end
-
--- ============================================================
--- MOVE DIAGNOSTIC LOG
--- Diagnostic only: no routing/state behaviour is changed here.
--- ============================================================
 
 local function configSummary(floor)
     if not floor then return "nil" end
