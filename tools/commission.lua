@@ -1,42 +1,60 @@
 -- ============================================================
--- RuffHouse CC:Tweaked Lift Commissioning Tool
+-- RuffHouse Lift Commissioning Tool
+-- CC:Tweaked
 --
 -- Configures:
---   - Lift shaft ID (A-D)
---   - Six physical landing monitors
+--   - Shaft ID
+--   - Floor monitor
+--   - Floor speaker
 --
--- Saves configuration to:
+-- Saves:
 --   /lift/config.lua
 -- ============================================================
 
 local FLOOR_COUNT = 6
+
 local CONFIG_DIR = "/lift"
 local CONFIG_FILE = "/lift/config.lua"
 
+local TEST_NOTE_INTERVAL = 0.75
+local TEST_NOTE_INSTRUMENT = "bell"
+local TEST_NOTE_VOLUME = 1
+local TEST_NOTE_PITCH = 12
+
+
 -- ============================================================
--- Utility functions
+-- General utilities
 -- ============================================================
+
+local function clearTerminal()
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+    term.clear()
+    term.setCursorPos(1, 1)
+end
+
 
 local function centerText(mon, text, y, colour)
     local w, h = mon.getSize()
 
-    mon.setBackgroundColor(colors.black)
-    mon.setTextColor(colour or colors.white)
-
     local x = math.floor((w - #text) / 2) + 1
 
-    mon.setCursorPos(
-        math.max(1, x),
-        y or math.ceil(h / 2)
-    )
-
+    mon.setTextColor(colour or colors.white)
+    mon.setCursorPos(math.max(1, x), y or math.ceil(h / 2))
     mon.write(text)
 end
 
-local function prepareMonitor(mon, text, colour)
+
+local function prepareMonitor(mon)
     mon.setTextScale(1)
     mon.setBackgroundColor(colors.black)
+    mon.setTextColor(colors.white)
     mon.clear()
+end
+
+
+local function showCentered(mon, text, colour)
+    prepareMonitor(mon)
 
     local _, h = mon.getSize()
 
@@ -48,17 +66,15 @@ local function prepareMonitor(mon, text, colour)
     )
 end
 
-local function clearTerminal()
-    term.clear()
-    term.setCursorPos(1, 1)
-end
 
 -- ============================================================
 -- Shaft selection
 -- ============================================================
 
 local function selectShaft()
+
     while true do
+
         clearTerminal()
 
         print("RuffHouse Lift Commissioning")
@@ -73,8 +89,7 @@ local function selectShaft()
         print()
         write("Shaft: ")
 
-        local input = read()
-        input = string.upper(input)
+        local input = string.upper(read())
 
         if input == "A"
         or input == "B"
@@ -85,58 +100,364 @@ local function selectShaft()
 
         print()
         print("Invalid shaft.")
-        print("Please enter A, B, C or D.")
-        sleep(2)
+        sleep(1.5)
     end
 end
 
+
 -- ============================================================
--- Discover monitors
+-- Peripheral discovery
 -- ============================================================
 
-local function discoverMonitors()
-    local monitorNames = {}
+local function discoverPeripheralType(targetType)
+
+    local results = {}
 
     for _, name in ipairs(peripheral.getNames()) do
-        if peripheral.getType(name) == "monitor" then
-            table.insert(monitorNames, name)
+
+        if peripheral.getType(name) == targetType then
+            table.insert(results, name)
+        end
+
+    end
+
+    table.sort(results)
+
+    return results
+end
+
+
+-- ============================================================
+-- Monitor commissioning
+-- ============================================================
+
+local function commissionMonitor(
+    floor,
+    shaft,
+    monitorNames,
+    assignedMonitors
+)
+
+    -- Display prompt on all currently unassigned monitors
+
+    for _, name in ipairs(monitorNames) do
+
+        if not assignedMonitors[name] then
+
+            local mon = peripheral.wrap(name)
+
+            showCentered(
+                mon,
+                "TOUCH FOR F" .. floor,
+                colors.orange
+            )
+
         end
     end
 
-    table.sort(monitorNames)
 
-    return monitorNames
+    clearTerminal()
+
+    print("RuffHouse Lift Commissioning")
+    print("============================")
+    print()
+    print("Shaft: " .. shaft)
+    print("Floor: " .. floor)
+    print()
+    print("MONITOR SETUP")
+    print()
+    print("Touch the landing monitor")
+    print("on Floor " .. floor .. ".")
+    print()
+
+
+    while true do
+
+        local _, monitorName =
+            os.pullEvent("monitor_touch")
+
+        if not assignedMonitors[monitorName] then
+
+            assignedMonitors[monitorName] = true
+
+            local mon =
+                peripheral.wrap(monitorName)
+
+            showCentered(
+                mon,
+                "F" .. floor .. " MONITOR OK",
+                colors.lime
+            )
+
+            return monitorName
+
+        end
+    end
 end
+
+
+-- ============================================================
+-- Speaker test screen
+-- ============================================================
+
+local function drawSpeakerTest(
+    mon,
+    floor,
+    speakerName
+)
+
+    prepareMonitor(mon)
+
+    local w, h = mon.getSize()
+
+    centerText(
+        mon,
+        "FLOOR " .. floor,
+        2,
+        colors.white
+    )
+
+    centerText(
+        mon,
+        "SPEAKER TEST",
+        4,
+        colors.orange
+    )
+
+    centerText(
+        mon,
+        speakerName,
+        6,
+        colors.lightGray
+    )
+
+    -- Bottom controls
+
+    mon.setTextColor(colors.red)
+    mon.setCursorPos(2, h)
+    mon.write("NO")
+
+    local yesText = "YES"
+
+    mon.setTextColor(colors.lime)
+    mon.setCursorPos(
+        math.max(1, w - #yesText),
+        h
+    )
+    mon.write(yesText)
+end
+
+
+-- ============================================================
+-- Test one speaker
+-- ============================================================
+
+local function testSpeaker(
+    floor,
+    monitorName,
+    speakerName
+)
+
+    local mon =
+        peripheral.wrap(monitorName)
+
+    local speaker =
+        peripheral.wrap(speakerName)
+
+    drawSpeakerTest(
+        mon,
+        floor,
+        speakerName
+    )
+
+
+    local decision = nil
+
+
+    -- Repeatedly play the test tone
+
+    local function soundLoop()
+
+        while decision == nil do
+
+            speaker.playNote(
+                TEST_NOTE_INSTRUMENT,
+                TEST_NOTE_VOLUME,
+                TEST_NOTE_PITCH
+            )
+
+            sleep(TEST_NOTE_INTERVAL)
+
+        end
+    end
+
+
+    -- Wait for a touch on THIS floor's monitor
+
+    local function touchLoop()
+
+        while decision == nil do
+
+            local _, touchedMonitor, x =
+                os.pullEvent("monitor_touch")
+
+            if touchedMonitor == monitorName then
+
+                local w, _ = mon.getSize()
+
+                if x <= math.floor(w / 2) then
+                    decision = false
+                else
+                    decision = true
+                end
+
+                return
+            end
+        end
+    end
+
+
+    parallel.waitForAny(
+        soundLoop,
+        touchLoop
+    )
+
+
+    speaker.stop()
+
+    return decision
+end
+
+
+-- ============================================================
+-- Speaker commissioning
+-- ============================================================
+
+local function commissionSpeaker(
+    floor,
+    shaft,
+    monitorName,
+    speakerNames,
+    assignedSpeakers
+)
+
+    clearTerminal()
+
+    print("RuffHouse Lift Commissioning")
+    print("============================")
+    print()
+    print("Shaft: " .. shaft)
+    print("Floor: " .. floor)
+    print()
+    print("SPEAKER SETUP")
+    print()
+    print("Stand beside the Floor " .. floor)
+    print("monitor.")
+    print()
+    print("A speaker will repeatedly")
+    print("play a test tone.")
+    print()
+    print("Tap:")
+    print("  LEFT  = wrong speaker")
+    print("  RIGHT = correct speaker")
+    print()
+
+
+    for _, speakerName in ipairs(speakerNames) do
+
+        if not assignedSpeakers[speakerName] then
+
+            local correct =
+                testSpeaker(
+                    floor,
+                    monitorName,
+                    speakerName
+                )
+
+            if correct then
+
+                assignedSpeakers[speakerName] = true
+
+                local mon =
+                    peripheral.wrap(monitorName)
+
+                showCentered(
+                    mon,
+                    "F" .. floor .. " HARDWARE OK",
+                    colors.lime
+                )
+
+                return speakerName
+
+            end
+        end
+    end
+
+
+    error(
+        "No speaker assigned to Floor "
+        .. floor
+    )
+end
+
 
 -- ============================================================
 -- Save configuration
 -- ============================================================
 
-local function saveConfig(shaft, mapping)
+local function saveConfig(
+    shaft,
+    floors
+)
+
     if not fs.exists(CONFIG_DIR) then
         fs.makeDir(CONFIG_DIR)
     end
 
-    local file = fs.open(CONFIG_FILE, "w")
+
+    local file =
+        fs.open(CONFIG_FILE, "w")
 
     if not file then
-        error("Unable to open " .. CONFIG_FILE)
-    end
-
-    file.writeLine("return {")
-    file.writeLine('    shaft = "' .. shaft .. '",')
-    file.writeLine("")
-    file.writeLine("    monitors = {")
-
-    for floor = 1, FLOOR_COUNT do
-        file.writeLine(
-            "        [" ..
-            floor ..
-            '] = "' ..
-            mapping[floor] ..
-            '",'
+        error(
+            "Unable to open "
+            .. CONFIG_FILE
         )
     end
+
+
+    file.writeLine("return {")
+    file.writeLine(
+        '    shaft = "' .. shaft .. '",'
+    )
+    file.writeLine("")
+    file.writeLine("    floors = {")
+
+
+    for floor = 1, FLOOR_COUNT do
+
+        file.writeLine(
+            "        [" .. floor .. "] = {"
+        )
+
+        file.writeLine(
+            '            monitor = "'
+            .. floors[floor].monitor
+            .. '",'
+        )
+
+        file.writeLine(
+            '            speaker = "'
+            .. floors[floor].speaker
+            .. '",'
+        )
+
+        file.writeLine(
+            "        },"
+        )
+
+    end
+
 
     file.writeLine("    }")
     file.writeLine("}")
@@ -144,142 +465,188 @@ local function saveConfig(shaft, mapping)
     file.close()
 end
 
+
 -- ============================================================
--- Start
+-- MAIN
 -- ============================================================
 
 local shaft = selectShaft()
+
+local monitorNames =
+    discoverPeripheralType("monitor")
+
+local speakerNames =
+    discoverPeripheralType("speaker")
+
 
 clearTerminal()
 
 print("RuffHouse Lift Commissioning")
 print("============================")
 print()
-print("Lift Shaft: " .. shaft)
+print("Shaft: " .. shaft)
 print()
-print("Scanning peripherals...")
+print(
+    "Monitors: "
+    .. #monitorNames
+    .. "/"
+    .. FLOOR_COUNT
+)
+
+print(
+    "Speakers: "
+    .. #speakerNames
+    .. "/"
+    .. FLOOR_COUNT
+)
+
 print()
 
-local monitorNames = discoverMonitors()
 
-print("Monitors detected: " .. #monitorNames)
+-- ============================================================
+-- Hardware validation
+-- ============================================================
 
 if #monitorNames ~= FLOOR_COUNT then
-    print()
+
     print("ERROR")
-    print("Expected " .. FLOOR_COUNT .. " monitors.")
-    print("Found " .. #monitorNames .. ".")
     print()
-    print("Commissioning aborted.")
+    print(
+        "Expected "
+        .. FLOOR_COUNT
+        .. " monitors."
+    )
+
+    print(
+        "Found "
+        .. #monitorNames
+        .. "."
+    )
+
     return
 end
 
-print("Monitor count OK.")
-sleep(1)
 
--- ============================================================
--- Commission monitors
--- ============================================================
+if #speakerNames ~= FLOOR_COUNT then
 
-local mapping = {}
-local assigned = {}
-
-for floor = 1, FLOOR_COUNT do
-
-    -- --------------------------------------------------------
-    -- Update all unassigned displays
-    -- --------------------------------------------------------
-
-    for _, name in ipairs(monitorNames) do
-        if not assigned[name] then
-            local mon = peripheral.wrap(name)
-
-            prepareMonitor(
-                mon,
-                "TOUCH FOR F" .. floor,
-                colors.orange
-            )
-        end
-    end
-
-    -- --------------------------------------------------------
-    -- Show instruction on computer
-    -- --------------------------------------------------------
-
-    clearTerminal()
-
-    print("RuffHouse Lift Commissioning")
-    print("============================")
+    print("ERROR")
     print()
-    print("Lift Shaft: " .. shaft)
-    print()
-    print("Waiting for FLOOR " .. floor)
-    print()
-    print("Touch the monitor")
-    print("physically located on Floor " .. floor .. ".")
-    print()
+    print(
+        "Expected "
+        .. FLOOR_COUNT
+        .. " speakers."
+    )
 
-    -- --------------------------------------------------------
-    -- Wait for correct monitor touch
-    -- --------------------------------------------------------
+    print(
+        "Found "
+        .. #speakerNames
+        .. "."
+    )
 
-    while true do
-        local _, monitorName = os.pullEvent("monitor_touch")
-
-        if assigned[monitorName] then
-            print(
-                "Monitor " ..
-                monitorName ..
-                " is already assigned."
-            )
-        else
-            mapping[floor] = monitorName
-            assigned[monitorName] = true
-
-            local mon = peripheral.wrap(monitorName)
-
-            mon.setBackgroundColor(colors.black)
-            mon.clear()
-
-            local _, h = mon.getSize()
-
-            centerText(
-                mon,
-                "F" .. floor .. " OK",
-                math.ceil(h / 2),
-                colors.lime
-            )
-
-            break
-        end
-    end
+    return
 end
 
+
+print("Hardware count OK.")
+sleep(1.5)
+
+
 -- ============================================================
--- Save configuration
+-- Commission floors
 -- ============================================================
 
-saveConfig(shaft, mapping)
+local floors = {}
+
+local assignedMonitors = {}
+local assignedSpeakers = {}
+
+
+for floor = 1, FLOOR_COUNT do
+
+    -- --------------------------------------------------------
+    -- Identify this floor's monitor
+    -- --------------------------------------------------------
+
+    local monitorName =
+        commissionMonitor(
+            floor,
+            shaft,
+            monitorNames,
+            assignedMonitors
+        )
+
+
+    -- --------------------------------------------------------
+    -- Identify this floor's speaker
+    -- --------------------------------------------------------
+
+    local speakerName =
+        commissionSpeaker(
+            floor,
+            shaft,
+            monitorName,
+            speakerNames,
+            assignedSpeakers
+        )
+
+
+    -- --------------------------------------------------------
+    -- Store floor hardware
+    -- --------------------------------------------------------
+
+    floors[floor] = {
+
+        monitor = monitorName,
+        speaker = speakerName
+
+    }
+
+
+    -- --------------------------------------------------------
+    -- Confirmation
+    -- --------------------------------------------------------
+
+    local mon =
+        peripheral.wrap(monitorName)
+
+    showCentered(
+        mon,
+        "FLOOR " .. floor .. " OK",
+        colors.lime
+    )
+
+    sleep(0.5)
+end
+
 
 -- ============================================================
--- Final monitor state
+-- Save
+-- ============================================================
+
+saveConfig(
+    shaft,
+    floors
+)
+
+
+-- ============================================================
+-- Final displays
 -- ============================================================
 
 for floor = 1, FLOOR_COUNT do
-    local mon = peripheral.wrap(mapping[floor])
 
-    mon.setBackgroundColor(colors.black)
-    mon.clear()
+    local mon =
+        peripheral.wrap(
+            floors[floor].monitor
+        )
 
-    local _, h = mon.getSize()
-
-    centerText(
+    showCentered(
         mon,
         "FLOOR " .. floor,
-        math.ceil(h / 2),
         colors.lime
     )
 end
+
 
 -- ============================================================
 -- Results
@@ -293,17 +660,26 @@ print()
 print("Lift Shaft: " .. shaft)
 print()
 
+
 for floor = 1, FLOOR_COUNT do
+
+    print("Floor " .. floor)
+
     print(
-        "Floor " ..
-        floor ..
-        " -> " ..
-        mapping[floor]
+        "  Monitor: "
+        .. floors[floor].monitor
     )
+
+    print(
+        "  Speaker: "
+        .. floors[floor].speaker
+    )
+
 end
 
+
 print()
-print("Configuration saved to:")
+print("Configuration saved:")
 print(CONFIG_FILE)
 print()
-print("All six monitors mapped.")
+print("All landing hardware mapped.")
