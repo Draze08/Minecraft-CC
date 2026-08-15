@@ -1,10 +1,10 @@
 -- ============================================================
--- RuffHouse Lift Controller v7.1
+-- RuffHouse Lift Controller v7.2
 -- REAL LIFT STATE / HMI + AUDIO
 --
 -- Display:
---   LEFT  = current/last observed Create short name
---   RIGHT = animated direction chevrons
+--   Each landing always displays its OWN Create short/long name.
+--   The lift state changes colour/animation only.
 --
 -- Colours:
 --   WHITE  = lift stopped elsewhere
@@ -254,6 +254,19 @@ local function getFloorShortName(floor)
     return tostring(shortName)
 end
 
+local function getFloorLongName(floor)
+
+    local floorConfig =
+        config.floors[floor]
+
+    if not floorConfig
+    or floorConfig.longName == nil then
+        return ""
+    end
+
+    return tostring(floorConfig.longName)
+end
+
 -- ============================================================
 -- ARROW ANIMATION
 -- ============================================================
@@ -357,11 +370,35 @@ local function drawDisplay(landingFloor)
         numberColour = colors.white
     end
 
+    -- IMPORTANT:
+    -- The monitor belongs to landingFloor, so it always shows
+    -- that landing's Create name. Lift position only changes
+    -- colour/animation; it never replaces the landing identity.
+
+    local shortName =
+        getFloorShortName(landingFloor)
+
+    local longName =
+        getFloorLongName(landingFloor)
+
     writeCenteredAt(
         mon,
         leftCenter,
         numberY,
-        getFloorShortName(state.floor),
+        shortName,
+        numberColour
+    )
+
+    -- Reserve a consistent label row above the short name.
+    -- Blank longName remains blank; shortName never moves.
+    local longNameY =
+        math.max(1, numberY - 2)
+
+    writeCenteredAt(
+        mon,
+        leftCenter,
+        longNameY,
+        longName,
         numberColour
     )
 
@@ -498,7 +535,7 @@ local function drawTerminal()
     clearTerminal()
 
     print(
-        "RuffHouse Lift Controller v7.1"
+        "RuffHouse Lift Controller v7.2"
     )
 
     print(
@@ -729,10 +766,6 @@ end
 
 -- ============================================================
 -- COMMISSIONED PHYSICAL FLOOR MAP
---
--- No sorting or invented orientation occurs here.
--- commission.lua already established the ordered landing list
--- and stored the Create Y coordinate beside its HMI hardware.
 -- ============================================================
 
 local function buildFloorMap()
@@ -768,10 +801,6 @@ end
 
 -- ============================================================
 -- CREATE LABEL CACHE
---
--- Names are presentation metadata. If a Create contact label is
--- changed after commissioning, refresh the cached short/long name
--- for its existing Y without changing monitor/speaker identity.
 -- ============================================================
 
 local function saveConfig()
@@ -841,6 +870,7 @@ local function syncCreateMetadata(createFloors)
 
     if changed then
         saveConfig()
+        refreshDisplays()
     end
 end
 
@@ -984,8 +1014,6 @@ local function stateLoop()
                     end
                 end
 
-                -- Fallback while Create reports zero speed at the
-                -- beginning/end of a movement transition.
                 -- Commissioned order is Y ascending, so a larger
                 -- index is physically upward.
                 if not direction
@@ -1014,10 +1042,14 @@ local function stateLoop()
 
                 if wasMoving then
 
+                    -- Destination is the most reliable arrival
+                    -- identity after a completed movement. Create's
+                    -- isCurrent can briefly still represent the
+                    -- departure landing at the transition boundary.
                     local arrivalFloor =
-                        info.currentFloor
+                        state.destination
+                        or info.currentFloor
                         or lastCurrentFloor
-                        or state.destination
 
                     if arrivalFloor then
                         arrive(arrivalFloor)
@@ -1149,14 +1181,14 @@ for floor = 1, FLOOR_COUNT do
 
     if not foundY[y] then
         error(
-            "Commissioned landing Y "
+            "Commissioned Create landing missing at Y "
             .. tostring(y)
-            .. " is not present in Create."
         )
     end
 end
 
 syncCreateMetadata(startupFloors)
+
 stopAllSpeakers()
 
 -- Initial monitor/terminal rendering happens inside stateLoop
@@ -1181,10 +1213,11 @@ state.running = false
 state.direction = "stopped"
 
 stopAllSpeakers()
+
 clearTerminal()
 
 print(
-    "RuffHouse Lift Controller v7.1"
+    "RuffHouse Lift Controller v7.2"
 )
 
 print(
