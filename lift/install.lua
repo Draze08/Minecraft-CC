@@ -1,9 +1,10 @@
 -- ============================================================
 -- RuffHouse Minecraft-CC Installer / Updater
+-- FEATURE BRANCH: create-liftlink
 -- ============================================================
 
 local BASE_URL =
-    "https://raw.githubusercontent.com/Draze08/Minecraft-CC/refs/heads/main/"
+    "https://raw.githubusercontent.com/Draze08/Minecraft-CC/refs/heads/feature/create-liftlink/"
 
 local files = {
     {
@@ -91,6 +92,8 @@ term.setCursorPos(1, 1)
 
 print("RuffHouse Minecraft-CC Updater")
 print("==============================")
+print()
+print("Source: feature/create-liftlink")
 print()
 
 -- ------------------------------------------------------------
