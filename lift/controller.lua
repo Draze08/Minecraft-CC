@@ -1,52 +1,37 @@
 -- ============================================================
--- RuffHouse Lift Controller v7.2
+-- RuffHouse Lift Controller v7.3
 -- REAL LIFT STATE / HMI + AUDIO
 --
 -- Display:
---   Each landing always displays its OWN Create short/long name.
---   The lift state changes colour/animation only.
+--   All landing monitors display the CURRENT lift landing name
+--   from /lift/config.lua.
+--   The monitor at the current landing is LIME when stopped.
+--   Other landing monitors are WHITE when stopped.
+--   All monitors are ORANGE with direction arrows while moving.
 --
--- Colours:
---   WHITE  = lift stopped elsewhere
---   LIME   = lift stopped at this landing
---   ORANGE = lift moving
+-- Config / Create contract:
+--   Commissioning stores each Create landing Y, shortName,
+--   longName, monitor and speaker.
+--   Y is the durable join between LiftLink and commissioned HMI.
+--   The controller USES the commissioned config for display/audio.
+--   Create may refresh shortName/longName only when lift activity
+--   is observed. Monitor/speaker/Y mappings are never rewritten.
 --
 -- Audio:
 --   EnderIO SAG Mill tumble while moving
 --   All movement audio STOPPED on arrival
 --   Two-note bell on destination floor after movement stops
 --
--- State input:
---   CC:LiftLink create_elevator peripheral.
---
---   Create owns elevator movement and physical call buttons.
---   This controller observes LiftLink state and drives HMI/audio.
---
--- Landing identity:
---   /lift/config.lua stores the commissioned Create Y coordinate
---   for each landing. Y is the durable join between LiftLink and
---   the commissioned monitor/speaker pair.
---
--- The controller NEVER commands the lift.
--- Physical call buttons remain entirely human controlled.
+-- Create owns movement and physical call buttons.
+-- This controller observes LiftLink state and drives HMI/audio.
 -- ============================================================
 
 local CONFIG_FILE = "/lift/config.lua"
 
--- ============================================================
--- DISPLAY SETTINGS
--- ============================================================
-
 local TEXT_SCALE = 2
 local ANIMATION_INTERVAL = 0.25
 
--- ============================================================
--- AUDIO SETTINGS
--- ============================================================
-
-local MOVE_SOUND =
-    "enderio:block.sag_mill.tumble"
-
+local MOVE_SOUND = "enderio:block.sag_mill.tumble"
 local MOVE_VOLUME = 0.5
 local MOVE_PITCH = 0.8
 local MOVE_INTERVAL = 1.5
@@ -55,10 +40,6 @@ local ARRIVAL_INSTRUMENT = "bell"
 local ARRIVAL_VOLUME = 3
 local ARRIVAL_PITCH = 12
 
--- ============================================================
--- LIFTLINK SETTINGS
--- ============================================================
-
 local LIFTLINK_POLL_INTERVAL = 0.05
 
 -- ============================================================
@@ -66,71 +47,42 @@ local LIFTLINK_POLL_INTERVAL = 0.05
 -- ============================================================
 
 if not fs.exists(CONFIG_FILE) then
-    error(
-        "Lift configuration not found: "
-        .. CONFIG_FILE
-    )
+    error("Lift configuration not found: " .. CONFIG_FILE)
 end
 
-local config =
-    dofile(CONFIG_FILE)
+local config = dofile(CONFIG_FILE)
 
 if not config then
-    error(
-        "Unable to load lift configuration."
-    )
+    error("Unable to load lift configuration.")
 end
 
 if not config.floors then
-    error(
-        "Configuration contains no floor data."
-    )
+    error("Configuration contains no floor data.")
 end
 
-local FLOOR_COUNT =
-    #config.floors
+local FLOOR_COUNT = #config.floors
 
 if FLOOR_COUNT < 1 then
-    error(
-        "Configuration contains no commissioned landings."
-    )
+    error("Configuration contains no commissioned landings.")
 end
 
--- ============================================================
--- VALIDATE CONFIG
--- ============================================================
-
 for floor = 1, FLOOR_COUNT do
-
-    local floorConfig =
-        config.floors[floor]
+    local floorConfig = config.floors[floor]
 
     if not floorConfig then
-        error(
-            "Missing configuration for landing "
-            .. floor
-        )
+        error("Missing configuration for landing " .. floor)
     end
 
     if type(floorConfig.y) ~= "number" then
-        error(
-            "Missing Create Y for landing "
-            .. floor
-        )
+        error("Missing Create Y for landing " .. floor)
     end
 
     if not floorConfig.monitor then
-        error(
-            "Missing monitor for landing "
-            .. floor
-        )
+        error("Missing monitor for landing " .. floor)
     end
 
     if not floorConfig.speaker then
-        error(
-            "Missing speaker for landing "
-            .. floor
-        )
+        error("Missing speaker for landing " .. floor)
     end
 end
 
@@ -162,33 +114,23 @@ local state = {
 -- ============================================================
 
 local function getMonitor(floor)
+    local floorConfig = config.floors[floor]
 
-    local floorConfig =
-        config.floors[floor]
-
-    if not floorConfig
-    or not floorConfig.monitor then
+    if not floorConfig or not floorConfig.monitor then
         return nil
     end
 
-    return peripheral.wrap(
-        floorConfig.monitor
-    )
+    return peripheral.wrap(floorConfig.monitor)
 end
 
 local function getSpeaker(floor)
+    local floorConfig = config.floors[floor]
 
-    local floorConfig =
-        config.floors[floor]
-
-    if not floorConfig
-    or not floorConfig.speaker then
+    if not floorConfig or not floorConfig.speaker then
         return nil
     end
 
-    return peripheral.wrap(
-        floorConfig.speaker
-    )
+    return peripheral.wrap(floorConfig.speaker)
 end
 
 -- ============================================================
@@ -196,7 +138,6 @@ end
 -- ============================================================
 
 local function clearTerminal()
-
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.clear()
@@ -207,77 +148,42 @@ end
 -- MONITOR HELPERS
 -- ============================================================
 
-local function writeCenteredAt(
-    mon,
-    centerX,
-    y,
-    text,
-    colour
-)
-
+local function writeCenteredAt(mon, centerX, y, text, colour)
     text = tostring(text or "")
 
-    local x =
-        math.floor(
-            centerX - (#text / 2)
-        ) + 1
+    local x = math.floor(centerX - (#text / 2)) + 1
 
-    mon.setTextColor(
-        colour or colors.white
-    )
-
-    mon.setCursorPos(
-        math.max(1, x),
-        y
-    )
-
+    mon.setTextColor(colour or colors.white)
+    mon.setCursorPos(math.max(1, x), y)
     mon.write(text)
 end
 
 local function getFloorShortName(floor)
-
-    local floorConfig =
-        config.floors[floor]
+    local floorConfig = config.floors[floor]
 
     if not floorConfig then
-        return tostring(floor)
-    end
-
-    local shortName =
-        floorConfig.shortName
-
-    if shortName == nil
-    or tostring(shortName) == "" then
-        return tostring(floor)
-    end
-
-    return tostring(shortName)
-end
-
-local function getFloorLongName(floor)
-
-    local floorConfig =
-        config.floors[floor]
-
-    if not floorConfig
-    or floorConfig.longName == nil then
         return ""
     end
 
-    return tostring(floorConfig.longName)
+    return tostring(floorConfig.shortName or "")
+end
+
+local function getFloorLongName(floor)
+    local floorConfig = config.floors[floor]
+
+    if not floorConfig then
+        return ""
+    end
+
+    return tostring(floorConfig.longName or "")
 end
 
 -- ============================================================
 -- ARROW ANIMATION
 -- ============================================================
 
-local function getArrowRows(
-    direction,
-    frame
-)
-
+local function getArrowRows(direction, frame)
     if direction == "up" then
-
         if frame == 1 then
             return { " ", "^", " " }
         elseif frame == 2 then
@@ -285,9 +191,7 @@ local function getArrowRows(
         else
             return { "^", " ", "^" }
         end
-
     elseif direction == "down" then
-
         if frame == 1 then
             return { " ", "v", " " }
         elseif frame == 2 then
@@ -305,31 +209,17 @@ end
 -- ============================================================
 
 local function getDisplayPositions(w, h)
-
-    local leftCenter =
-        math.max(
-            1,
-            math.floor(w * 0.28)
-        )
-
-    local rightCenter =
-        math.max(
-            1,
-            math.floor(w * 0.72)
-        )
+    local leftCenter = math.max(1, math.floor(w * 0.28))
+    local rightCenter = math.max(1, math.floor(w * 0.72))
 
     -- Preserved Controller V4 visual vertical centre.
-    local numberY =
-        math.floor((h + 1) / 2) + 1
+    local numberY = math.floor((h + 1) / 2) + 1
 
     if numberY > h then
         numberY = h
     end
 
-    return
-        leftCenter,
-        rightCenter,
-        numberY
+    return leftCenter, rightCenter, numberY
 end
 
 -- ============================================================
@@ -337,9 +227,7 @@ end
 -- ============================================================
 
 local function drawDisplay(landingFloor)
-
-    local mon =
-        getMonitor(landingFloor)
+    local mon = getMonitor(landingFloor)
 
     if not mon then
         return
@@ -349,37 +237,25 @@ local function drawDisplay(landingFloor)
     mon.setBackgroundColor(colors.black)
     mon.clear()
 
-    local w, h =
-        mon.getSize()
-
-    local leftCenter,
-          rightCenter,
-          numberY =
-        getDisplayPositions(w, h)
+    local w, h = mon.getSize()
+    local leftCenter, rightCenter, numberY = getDisplayPositions(w, h)
 
     local numberColour
 
     if state.direction ~= "stopped" then
         numberColour = colors.orange
-
-    elseif state.positionKnown
-    and state.floor == landingFloor then
+    elseif state.positionKnown and state.floor == landingFloor then
         numberColour = colors.lime
-
     else
         numberColour = colors.white
     end
 
-    -- IMPORTANT:
-    -- The monitor belongs to landingFloor, so it always shows
-    -- that landing's Create name. Lift position only changes
-    -- colour/animation; it never replaces the landing identity.
-
-    local shortName =
-        getFloorShortName(landingFloor)
-
-    local longName =
-        getFloorLongName(landingFloor)
+    -- The displayed identity is the CURRENT lift floor.
+    -- Names come directly from the commissioned config entry
+    -- selected by Create Y -> config floor mapping.
+    local displayFloor = state.positionKnown and state.floor or nil
+    local shortName = displayFloor and getFloorShortName(displayFloor) or ""
+    local longName = displayFloor and getFloorLongName(displayFloor) or ""
 
     writeCenteredAt(
         mon,
@@ -389,10 +265,8 @@ local function drawDisplay(landingFloor)
         numberColour
     )
 
-    -- Reserve a consistent label row above the short name.
-    -- Blank longName remains blank; shortName never moves.
-    local longNameY =
-        math.max(1, numberY - 2)
+    -- Keep the short-name baseline fixed even when longName is blank.
+    local longNameY = math.max(1, numberY - 2)
 
     writeCenteredAt(
         mon,
@@ -403,25 +277,13 @@ local function drawDisplay(landingFloor)
     )
 
     if state.direction ~= "stopped" then
-
-        local arrows =
-            getArrowRows(
-                state.direction,
-                state.animationFrame
-            )
-
-        local topRow =
-            numberY - 1
+        local arrows = getArrowRows(state.direction, state.animationFrame)
+        local topRow = numberY - 1
 
         for i = 1, 3 do
+            local row = topRow + (i - 1)
 
-            local row =
-                topRow + (i - 1)
-
-            if row >= 1
-            and row <= h
-            and arrows[i] ~= " " then
-
+            if row >= 1 and row <= h and arrows[i] ~= " " then
                 writeCenteredAt(
                     mon,
                     rightCenter,
@@ -434,27 +296,19 @@ local function drawDisplay(landingFloor)
     end
 end
 
--- ============================================================
--- REFRESH ALL DISPLAYS
--- ============================================================
-
 local function refreshDisplays()
-
     for floor = 1, FLOOR_COUNT do
         drawDisplay(floor)
     end
 end
 
 -- ============================================================
--- STOP ALL SPEAKERS
+-- AUDIO
 -- ============================================================
 
 local function stopAllSpeakers()
-
     for floor = 1, FLOOR_COUNT do
-
-        local speaker =
-            getSpeaker(floor)
+        local speaker = getSpeaker(floor)
 
         if speaker then
             speaker.stop()
@@ -465,31 +319,21 @@ local function stopAllSpeakers()
     state.audioSuccess = 0
 end
 
--- ============================================================
--- PLAY MOVEMENT SOUND
--- ============================================================
-
 local function playMovementSound()
-
     local successCount = 0
 
     for floor = 1, FLOOR_COUNT do
-
-        local speaker =
-            getSpeaker(floor)
+        local speaker = getSpeaker(floor)
 
         if speaker then
-
-            local success =
-                speaker.playSound(
-                    MOVE_SOUND,
-                    MOVE_VOLUME,
-                    MOVE_PITCH
-                )
+            local success = speaker.playSound(
+                MOVE_SOUND,
+                MOVE_VOLUME,
+                MOVE_PITCH
+            )
 
             if success then
-                successCount =
-                    successCount + 1
+                successCount = successCount + 1
             end
         end
     end
@@ -498,14 +342,8 @@ local function playMovementSound()
     state.audioSuccess = successCount
 end
 
--- ============================================================
--- ARRIVAL CHIME
--- ============================================================
-
 local function playArrival(floor)
-
-    local speaker =
-        getSpeaker(floor)
+    local speaker = getSpeaker(floor)
 
     if not speaker then
         return
@@ -531,47 +369,23 @@ end
 -- ============================================================
 
 local function drawTerminal()
-
     clearTerminal()
 
-    print(
-        "RuffHouse Lift Controller v7.2"
-    )
-
-    print(
-        "============================"
-    )
-
+    print("RuffHouse Lift Controller v7.3")
+    print("============================")
     print()
-
-    print(
-        "Shaft: "
-        .. tostring(config.shaft)
-    )
+    print("Shaft: " .. tostring(config.shaft))
 
     if state.positionKnown then
-        print(
-            "Current floor: "
-            .. getFloorShortName(state.floor)
-        )
+        print("Current floor: " .. getFloorShortName(state.floor))
     else
         print("Current floor: UNKNOWN")
     end
 
-    print(
-        "State: "
-        .. string.upper(
-            state.direction
-        )
-    )
+    print("State: " .. string.upper(state.direction))
 
     if state.destination then
-        print(
-            "Destination: "
-            .. getFloorShortName(
-                state.destination
-            )
-        )
+        print("Destination: " .. getFloorShortName(state.destination))
     else
         print("Destination: NONE")
     end
@@ -580,12 +394,7 @@ local function drawTerminal()
 
     if state.direction ~= "stopped" then
         print("Movement audio: ACTIVE")
-        print(
-            "Speakers: "
-            .. tostring(state.audioSuccess)
-            .. "/"
-            .. tostring(FLOOR_COUNT)
-        )
+        print("Speakers: " .. tostring(state.audioSuccess) .. "/" .. tostring(FLOOR_COUNT))
     else
         print("Movement audio: STOPPED")
     end
@@ -597,28 +406,8 @@ local function drawTerminal()
     print("CREATE LIFTLINK MODE")
     print("--------------------")
     print()
-
-    print(
-        "Peripheral: "
-        .. tostring(
-            state.elevatorName
-            or "UNKNOWN"
-        )
-    )
-
-    print(
-        "Create label: "
-        .. tostring(
-            state.createShortName
-            or ""
-        )
-        .. " | "
-        .. tostring(
-            state.createLongName
-            or ""
-        )
-    )
-
+    print("Peripheral: " .. tostring(state.elevatorName or "UNKNOWN"))
+    print("Create label: " .. tostring(state.createShortName or "") .. " | " .. tostring(state.createLongName or ""))
     print()
     print("Create owns movement and call buttons.")
     print("Controller observes only.")
@@ -627,53 +416,25 @@ local function drawTerminal()
 end
 
 -- ============================================================
--- FLOOR POSITION
--- ============================================================
-
-local function setFloor(floor)
-
-    if floor < 1
-    or floor > FLOOR_COUNT then
-        return
-    end
-
-    state.floor = floor
-    state.positionKnown = true
-
-    refreshDisplays()
-    drawTerminal()
-end
-
--- ============================================================
--- START MOVEMENT
+-- MOVEMENT STATE
 -- ============================================================
 
 local function startMovement(direction)
-
     if state.direction == direction then
         return
     end
 
     stopAllSpeakers()
-
     state.direction = direction
     state.animationFrame = 1
 
-    -- Preserved V4 behaviour: movement audio starts immediately.
     playMovementSound()
-
     refreshDisplays()
     drawTerminal()
 end
 
--- ============================================================
--- STOP MOVEMENT WITHOUT ARRIVAL CHIME
--- ============================================================
-
 local function stopMovement()
-
     stopAllSpeakers()
-
     state.direction = "stopped"
     state.animationFrame = 1
 
@@ -681,20 +442,7 @@ local function stopMovement()
     drawTerminal()
 end
 
--- ============================================================
--- ARRIVAL
--- ============================================================
-
 local function arrive(floor)
-
-    -- ORDER IS IMPORTANT:
-    -- 1. Kill machinery audio.
-    -- 2. Update actual floor.
-    -- 3. Set stopped state.
-    -- 4. Redraw displays.
-    -- 5. Play destination chime.
-    -- Never stop speakers after playing the bell.
-
     stopAllSpeakers()
 
     state.floor = floor
@@ -715,47 +463,26 @@ end
 -- ============================================================
 
 local function discoverElevator()
-
-    -- Prefer the exact peripheral commissioned into config.
     if config.elevator
     and peripheral.isPresent(config.elevator)
-    and peripheral.hasType(
-        config.elevator,
-        "create_elevator"
-    ) then
+    and peripheral.hasType(config.elevator, "create_elevator") then
+        local candidate = peripheral.wrap(config.elevator)
+        local ok, floors = pcall(candidate.listFloors)
 
-        local candidate =
-            peripheral.wrap(config.elevator)
-
-        local ok, floors =
-            pcall(candidate.listFloors)
-
-        if ok
-        and type(floors) == "table" then
+        if ok and type(floors) == "table" then
             return config.elevator, candidate
         end
     end
 
-    -- Fallback discovery keeps the old resilience if the
-    -- peripheral network renames the elevator.
     local names = peripheral.getNames()
     table.sort(names)
 
     for _, name in ipairs(names) do
+        if peripheral.hasType(name, "create_elevator") then
+            local candidate = peripheral.wrap(name)
+            local ok, floors = pcall(candidate.listFloors)
 
-        if peripheral.hasType(
-            name,
-            "create_elevator"
-        ) then
-
-            local candidate =
-                peripheral.wrap(name)
-
-            local ok, floors =
-                pcall(candidate.listFloors)
-
-            if ok
-            and type(floors) == "table" then
+            if ok and type(floors) == "table" then
                 return name, candidate
             end
         end
@@ -769,19 +496,13 @@ end
 -- ============================================================
 
 local function buildFloorMap()
-
     local byY = {}
 
     for floor = 1, FLOOR_COUNT do
-
-        local y =
-            config.floors[floor].y
+        local y = config.floors[floor].y
 
         if byY[y] then
-            error(
-                "Duplicate commissioned Create Y: "
-                .. tostring(y)
-            )
+            error("Duplicate commissioned Create Y: " .. tostring(y))
         end
 
         byY[y] = floor
@@ -791,7 +512,6 @@ local function buildFloorMap()
 end
 
 local function floorFromY(y)
-
     if type(y) ~= "number" then
         return nil
     end
@@ -804,65 +524,35 @@ end
 -- ============================================================
 
 local function saveConfig()
-
-    local file =
-        fs.open(CONFIG_FILE, "w")
+    local file = fs.open(CONFIG_FILE, "w")
 
     if not file then
         return false
     end
 
-    file.write(
-        "return "
-        .. textutils.serialize(config)
-    )
-
+    file.write("return " .. textutils.serialize(config))
     file.close()
     return true
 end
 
 local function syncCreateMetadata(createFloors)
-
     local changed = false
 
     for _, info in ipairs(createFloors) do
-
-        local floor =
-            floorFromY(info.y)
+        local floor = floorFromY(info.y)
 
         if floor then
+            local floorConfig = config.floors[floor]
+            local shortName = tostring(info.shortName or info.name or "")
+            local longName = tostring(info.longName or "")
 
-            local floorConfig =
-                config.floors[floor]
-
-            local shortName =
-                tostring(
-                    info.shortName
-                    or info.name
-                    or ""
-                )
-
-            local longName =
-                tostring(
-                    info.longName
-                    or ""
-                )
-
-            if floorConfig.shortName
-                ~= shortName then
-
-                floorConfig.shortName =
-                    shortName
-
+            if floorConfig.shortName ~= shortName then
+                floorConfig.shortName = shortName
                 changed = true
             end
 
-            if floorConfig.longName
-                ~= longName then
-
-                floorConfig.longName =
-                    longName
-
+            if floorConfig.longName ~= longName then
+                floorConfig.longName = longName
                 changed = true
             end
         end
@@ -874,12 +564,11 @@ local function syncCreateMetadata(createFloors)
     end
 end
 
+-- Read Create state only. Metadata is deliberately NOT synced here;
+-- config remains the normal source of truth. Metadata refresh is
+-- triggered by actual lift movement/arrival activity below.
 local function readLiftLink()
-
-    local floors =
-        elevator.listFloors()
-
-    syncCreateMetadata(floors)
+    local floors = elevator.listFloors()
 
     local currentFloor = nil
     local targetFloor = nil
@@ -887,33 +576,25 @@ local function readLiftLink()
     local targetInfo = nil
 
     for _, info in ipairs(floors) do
-
         if info.isCurrent then
-            currentFloor =
-                floorFromY(info.y)
+            currentFloor = floorFromY(info.y)
             currentInfo = info
         end
 
         if info.isTarget then
-            targetFloor =
-                floorFromY(info.y)
+            targetFloor = floorFromY(info.y)
             targetInfo = info
         end
     end
 
-    local moving =
-        elevator.isMoving()
-
-    local speed =
-        elevator.getSpeed()
-
     return {
+        floors = floors,
         currentFloor = currentFloor,
         targetFloor = targetFloor,
         currentInfo = currentInfo,
         targetInfo = targetInfo,
-        moving = moving,
-        speed = speed
+        moving = elevator.isMoving(),
+        speed = elevator.getSpeed()
     }
 end
 
@@ -922,91 +603,60 @@ end
 -- ============================================================
 
 local function stateLoop()
-
     local wasMoving = false
     local lastCurrentFloor = nil
 
-    -- Initial state comes directly from Create.
-    -- Do not play an arrival chime on controller startup.
-    local initial =
-        readLiftLink()
+    -- Initial position comes from Create, but startup does not
+    -- rewrite commissioned labels and does not play an arrival bell.
+    local initial = readLiftLink()
 
     if initial.currentFloor then
-
-        state.floor =
-            initial.currentFloor
-
+        state.floor = initial.currentFloor
         state.positionKnown = true
-        state.lastObservedFloor =
-            initial.currentFloor
-
-        lastCurrentFloor =
-            initial.currentFloor
+        state.lastObservedFloor = initial.currentFloor
+        lastCurrentFloor = initial.currentFloor
     end
 
     if initial.currentInfo then
-
-        state.createShortName =
-            initial.currentInfo.shortName
-            or initial.currentInfo.name
-            or ""
-
-        state.createLongName =
-            initial.currentInfo.longName
-            or ""
+        state.createShortName = initial.currentInfo.shortName or initial.currentInfo.name or ""
+        state.createLongName = initial.currentInfo.longName or ""
     end
 
-    state.destination =
-        initial.targetFloor
+    state.destination = initial.targetFloor
 
     refreshDisplays()
     drawTerminal()
 
     while state.running do
-
-        local ok, info =
-            pcall(readLiftLink)
+        local ok, info = pcall(readLiftLink)
 
         if ok and info then
-
             if info.currentFloor then
-
-                state.floor =
-                    info.currentFloor
-
+                state.floor = info.currentFloor
                 state.positionKnown = true
-                state.lastObservedFloor =
-                    info.currentFloor
-
-                lastCurrentFloor =
-                    info.currentFloor
+                state.lastObservedFloor = info.currentFloor
+                lastCurrentFloor = info.currentFloor
             end
 
             if info.currentInfo then
-
-                state.createShortName =
-                    info.currentInfo.shortName
-                    or info.currentInfo.name
-                    or ""
-
-                state.createLongName =
-                    info.currentInfo.longName
-                    or ""
+                state.createShortName = info.currentInfo.shortName or info.currentInfo.name or ""
+                state.createLongName = info.currentInfo.longName or ""
             end
 
             if info.targetFloor then
-                state.destination =
-                    info.targetFloor
+                state.destination = info.targetFloor
             end
 
             if info.moving then
+                -- Lift activity is the trigger for refreshing Create's
+                -- short/long names into the commissioned config.
+                if not wasMoving then
+                    syncCreateMetadata(info.floors)
+                end
 
                 local direction = nil
 
-                -- Create Y increases upward.
-                if type(info.speed) == "number"
-                and info.speed ~= 0 then
-
+                if type(info.speed) == "number" and info.speed ~= 0 then
                     if info.speed > 0 then
                         direction = "up"
                     else
@@ -1014,38 +664,28 @@ local function stateLoop()
                     end
                 end
 
-                -- Commissioned order is Y ascending, so a larger
-                -- index is physically upward.
-                if not direction
-                and state.destination
-                and state.positionKnown then
-
+                if not direction and state.destination and state.positionKnown then
                     if state.destination > state.floor then
                         direction = "up"
-
                     elseif state.destination < state.floor then
                         direction = "down"
                     end
                 end
 
                 if direction then
-
-                    if not wasMoving
-                    or state.direction ~= direction then
+                    if not wasMoving or state.direction ~= direction then
                         startMovement(direction)
                     end
                 end
 
                 wasMoving = true
-
             else
-
                 if wasMoving then
+                    -- Refresh Create names again on arrival, then use
+                    -- the retained target to select the commissioned
+                    -- destination speaker.
+                    syncCreateMetadata(info.floors)
 
-                    -- Destination is the most reliable arrival
-                    -- identity after a completed movement. Create's
-                    -- isCurrent can briefly still represent the
-                    -- departure landing at the transition boundary.
                     local arrivalFloor =
                         state.destination
                         or info.currentFloor
@@ -1056,7 +696,6 @@ local function stateLoop()
                     else
                         stopMovement()
                     end
-
                 elseif state.direction ~= "stopped" then
                     stopMovement()
                 end
@@ -1078,13 +717,9 @@ end
 -- ============================================================
 
 local function animationLoop()
-
     while state.running do
-
         if state.direction ~= "stopped" then
-
-            state.animationFrame =
-                state.animationFrame + 1
+            state.animationFrame = state.animationFrame + 1
 
             if state.animationFrame > 3 then
                 state.animationFrame = 1
@@ -1092,7 +727,6 @@ local function animationLoop()
 
             refreshDisplays()
             sleep(ANIMATION_INTERVAL)
-
         else
             sleep(0.1)
         end
@@ -1104,20 +738,14 @@ end
 -- ============================================================
 
 local function movementAudioLoop()
-
     while state.running do
-
         if state.direction ~= "stopped" then
-
-            -- First sound already fired by startMovement().
             sleep(MOVE_INTERVAL)
 
-            -- State may have changed while sleeping.
             if state.direction ~= "stopped" then
                 playMovementSound()
                 drawTerminal()
             end
-
         else
             sleep(0.1)
         end
@@ -1129,11 +757,8 @@ end
 -- ============================================================
 
 local function keyboardLoop()
-
     while state.running do
-
-        local _, key =
-            os.pullEvent("key")
+        local _, key = os.pullEvent("key")
 
         if key == keys.q then
             state.running = false
@@ -1146,26 +771,18 @@ end
 -- STARTUP
 -- ============================================================
 
-elevatorName,
-elevator =
-    discoverElevator()
+elevatorName, elevator = discoverElevator()
 
 if not elevator then
-    error(
-        "No CC:LiftLink create_elevator peripheral found."
-    )
+    error("No CC:LiftLink create_elevator peripheral found.")
 end
 
-state.elevatorName =
-    elevatorName
+state.elevatorName = elevatorName
+createFloorByY = buildFloorMap()
 
-createFloorByY =
-    buildFloorMap()
-
--- Confirm every commissioned Y still exists in Create.
-local startupFloors =
-    elevator.listFloors()
-
+-- Validate that every commissioned Y still exists in Create.
+-- Validation does not alter config.
+local startupFloors = elevator.listFloors()
 local foundY = {}
 
 for _, info in ipairs(startupFloors) do
@@ -1175,24 +792,14 @@ for _, info in ipairs(startupFloors) do
 end
 
 for floor = 1, FLOOR_COUNT do
-
-    local y =
-        config.floors[floor].y
+    local y = config.floors[floor].y
 
     if not foundY[y] then
-        error(
-            "Commissioned Create landing missing at Y "
-            .. tostring(y)
-        )
+        error("Commissioned Create landing missing at Y " .. tostring(y))
     end
 end
 
-syncCreateMetadata(startupFloors)
-
 stopAllSpeakers()
-
--- Initial monitor/terminal rendering happens inside stateLoop
--- after LiftLink has supplied the real physical position.
 
 -- ============================================================
 -- RUN
@@ -1213,16 +820,9 @@ state.running = false
 state.direction = "stopped"
 
 stopAllSpeakers()
-
 clearTerminal()
 
-print(
-    "RuffHouse Lift Controller v7.2"
-)
-
-print(
-    "============================"
-)
-
+print("RuffHouse Lift Controller v7.3")
+print("============================")
 print()
 print("Controller stopped.")
