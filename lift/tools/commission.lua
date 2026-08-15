@@ -1,694 +1,1378 @@
 -- ============================================================
--- RuffHouse Lift Commissioning Tool V2
--- CC:Tweaked
+-- RuffHouse Lift Controller v7.0
+-- REAL LIFT STATE / HMI + AUDIO
 --
--- Configures:
---   - Shaft ID
---   - Floor monitor
---   - Floor speaker
+-- Display:
+--   LEFT  = current/last observed floor
+--   RIGHT = animated direction chevrons
 --
--- Monitor + speaker commissioning logic is preserved exactly
--- from the known-good V1 workflow.
+-- Colours:
+--   WHITE  = lift stopped elsewhere
+--   LIME   = lift stopped at this landing
+--   ORANGE = lift moving
 --
--- Create/LiftLink owns elevator state in V2.
--- No call/status redstone relays are commissioned here.
+-- Audio:
+--   EnderIO SAG Mill tumble while moving
+--   All movement audio STOPPED on arrival
+--   Two-note bell on destination floor after movement stops
 --
--- Saves:
+-- State input:
+--   CC:LiftLink create_elevator peripheral.
+--
+--   Create owns elevator movement and physical call buttons.
+--   This controller observes LiftLink state and drives HMI/audio.
+--
+-- Shaft orientation:
+--   1 -> 6 = DOWN
+--   6 -> 1 = UP
+--
+-- The controller NEVER commands the lift.
+-- Physical call buttons remain entirely human controlled.
+--
+-- Uses:
 --   /lift/config.lua
 -- ============================================================
 
-local FLOOR_COUNT = 6
-
-local CONFIG_DIR = "/lift"
 local CONFIG_FILE = "/lift/config.lua"
-
-local TEST_NOTE_INTERVAL = 0.75
-local TEST_NOTE_INSTRUMENT = "bell"
-local TEST_NOTE_VOLUME = 1
-local TEST_NOTE_PITCH = 12
+local FLOOR_COUNT = 6
 
 
 -- ============================================================
--- General utilities
+-- DISPLAY SETTINGS
+-- ============================================================
+
+local TEXT_SCALE = 2
+local ANIMATION_INTERVAL = 0.25
+
+
+-- ============================================================
+-- AUDIO SETTINGS
+-- ============================================================
+
+local MOVE_SOUND =
+    "enderio:block.sag_mill.tumble"
+
+local MOVE_VOLUME = 0.5
+local MOVE_PITCH = 0.8
+local MOVE_INTERVAL = 1.5
+
+local ARRIVAL_INSTRUMENT = "bell"
+local ARRIVAL_VOLUME = 3
+local ARRIVAL_PITCH = 12
+
+
+-- ============================================================
+-- LIFTLINK SETTINGS
+-- ============================================================
+
+local LIFTLINK_POLL_INTERVAL = 0.05
+
+
+-- ============================================================
+-- LOAD CONFIG
+-- ============================================================
+
+if not fs.exists(CONFIG_FILE) then
+    error(
+        "Lift configuration not found: "
+        .. CONFIG_FILE
+    )
+end
+
+
+local config =
+    dofile(CONFIG_FILE)
+
+
+if not config then
+    error(
+        "Unable to load lift configuration."
+    )
+end
+
+
+if not config.floors then
+    error(
+        "Configuration contains no floor data."
+    )
+end
+
+
+
+
+-- ============================================================
+-- VALIDATE CONFIG
+-- ============================================================
+
+for floor = 1, FLOOR_COUNT do
+
+    local floorConfig =
+        config.floors[floor]
+
+    if not floorConfig then
+
+        error(
+            "Missing configuration for Floor "
+            .. floor
+        )
+    end
+
+
+    if not floorConfig.monitor then
+
+        error(
+            "Missing monitor for Floor "
+            .. floor
+        )
+    end
+
+
+    if not floorConfig.speaker then
+
+        error(
+            "Missing speaker for Floor "
+            .. floor
+        )
+    end
+
+end
+
+
+-- ============================================================
+-- STATE
+-- ============================================================
+
+local elevatorName = nil
+local elevator = nil
+local createFloorByY = nil
+
+
+local state = {
+
+    -- Last known / currently observed floor.
+
+    floor = 1,
+
+    -- stopped / up / down
+
+    direction = "stopped",
+
+    -- Destination selected by a physical call button.
+
+    destination = nil,
+
+    animationFrame = 1,
+
+    running = true,
+
+    audioActive = false,
+    audioSuccess = 0,
+
+    elevatorName = nil,
+    createShortName = nil,
+    createLongName = nil,
+
+    -- Has the real physical lift position been established?
+
+    positionKnown = false,
+
+    -- Last floor observed through a pass or arrival event.
+
+    lastObservedFloor = nil
+}
+
+
+-- ============================================================
+-- PERIPHERAL HELPERS
+-- ============================================================
+
+local function getMonitor(floor)
+
+    local floorConfig =
+        config.floors[floor]
+
+    if not floorConfig
+    or not floorConfig.monitor then
+        return nil
+    end
+
+    return peripheral.wrap(
+        floorConfig.monitor
+    )
+end
+
+
+local function getSpeaker(floor)
+
+    local floorConfig =
+        config.floors[floor]
+
+    if not floorConfig
+    or not floorConfig.speaker then
+        return nil
+    end
+
+    return peripheral.wrap(
+        floorConfig.speaker
+    )
+end
+
+
+-- ============================================================
+-- TERMINAL HELPERS
 -- ============================================================
 
 local function clearTerminal()
+
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
+
     term.clear()
     term.setCursorPos(1, 1)
 end
 
 
-local function centerText(mon, text, y, colour)
-    local w, h = mon.getSize()
+-- ============================================================
+-- MONITOR HELPERS
+-- ============================================================
 
-    local x = math.floor((w - #text) / 2) + 1
+local function writeCenteredAt(
+    mon,
+    centerX,
+    y,
+    text,
+    colour
+)
 
-    mon.setTextColor(colour or colors.white)
+    local x =
+        math.floor(
+            centerX - (#text / 2)
+        ) + 1
+
+    mon.setTextColor(
+        colour or colors.white
+    )
+
     mon.setCursorPos(
         math.max(1, x),
-        y or math.ceil(h / 2)
+        y
     )
+
     mon.write(text)
 end
 
 
-local function prepareMonitor(mon)
-    mon.setTextScale(1)
-    mon.setBackgroundColor(colors.black)
-    mon.setTextColor(colors.white)
-    mon.clear()
-end
-
-
-local function showCentered(mon, text, colour)
-    prepareMonitor(mon)
-
-    local _, h = mon.getSize()
-
-    centerText(
-        mon,
-        text,
-        math.ceil(h / 2),
-        colour
-    )
-end
-
-
 -- ============================================================
--- Shaft selection
+-- ARROW ANIMATION
 -- ============================================================
 
-local function selectShaft()
-
-    while true do
-
-        clearTerminal()
-
-        print("RuffHouse Lift Commissioning")
-        print("============================")
-        print()
-        print("Select lift shaft:")
-        print()
-        print("  A")
-        print("  B")
-        print("  C")
-        print("  D")
-        print()
-        write("Shaft: ")
-
-        local input = string.upper(read())
-
-        if input == "A"
-        or input == "B"
-        or input == "C"
-        or input == "D" then
-            return input
-        end
-
-        print()
-        print("Invalid shaft.")
-        sleep(1.5)
-    end
-end
-
-
--- ============================================================
--- Peripheral discovery
--- ============================================================
-
-local function discoverPeripheralType(targetType)
-
-    local results = {}
-
-    for _, name in ipairs(peripheral.getNames()) do
-
-        if peripheral.getType(name) == targetType then
-            table.insert(results, name)
-        end
-
-    end
-
-    table.sort(results)
-
-    return results
-end
-
-
--- ============================================================
--- Monitor commissioning
--- V1.3 - preserved
--- ============================================================
-
-local function commissionMonitor(
-    floor,
-    shaft,
-    monitorNames,
-    assignedMonitors
+local function getArrowRows(
+    direction,
+    frame
 )
 
-    -- Display prompt on all currently unassigned monitors
+    if direction == "up" then
 
-    for _, name in ipairs(monitorNames) do
+        if frame == 1 then
 
-        if not assignedMonitors[name] then
+            return {
+                " ",
+                "^",
+                " "
+            }
 
-            local mon = peripheral.wrap(name)
+        elseif frame == 2 then
 
-            showCentered(
-                mon,
-                "TOUCH FOR F" .. floor,
-                colors.orange
-            )
+            return {
+                "^",
+                "^",
+                " "
+            }
 
+        else
+
+            return {
+                "^",
+                " ",
+                "^"
+            }
+        end
+
+
+    elseif direction == "down" then
+
+        if frame == 1 then
+
+            return {
+                " ",
+                "v",
+                " "
+            }
+
+        elseif frame == 2 then
+
+            return {
+                " ",
+                "v",
+                "v"
+            }
+
+        else
+
+            return {
+                "v",
+                " ",
+                "v"
+            }
         end
     end
 
 
-    clearTerminal()
-
-    print("RuffHouse Lift Commissioning")
-    print("============================")
-    print()
-    print("Shaft: " .. shaft)
-    print("Floor: " .. floor)
-    print()
-    print("MONITOR SETUP")
-    print()
-    print("Touch the landing monitor")
-    print("on Floor " .. floor .. ".")
-    print()
+    return {
+        " ",
+        " ",
+        " "
+    }
+end
 
 
-    while true do
+-- ============================================================
+-- DISPLAY POSITIONING
+-- ============================================================
 
-        local _, monitorName =
-            os.pullEvent("monitor_touch")
+local function getDisplayPositions(w, h)
 
-        if not assignedMonitors[monitorName] then
+    local leftCenter =
+        math.max(
+            1,
+            math.floor(w * 0.28)
+        )
 
-            assignedMonitors[monitorName] = true
+    local rightCenter =
+        math.max(
+            1,
+            math.floor(w * 0.72)
+        )
 
-            local mon =
-                peripheral.wrap(monitorName)
 
-            showCentered(
-                mon,
-                "F" .. floor .. " MONITOR OK",
-                colors.lime
-            )
+    -- --------------------------------------------------------
+    -- VISUAL vertical centre
+    --
+    -- Preserved from Controller V4.
+    --
+    -- CC monitor glyphs sit above their baseline, so simply
+    -- using the mathematical centre makes the number appear
+    -- too high.
+    --
+    -- Bias the baseline downward by one character row.
+    -- --------------------------------------------------------
 
-            return monitorName
+    local numberY =
+        math.floor((h + 1) / 2) + 1
 
-        end
+
+    if numberY > h then
+        numberY = h
     end
+
+
+    return
+        leftCenter,
+        rightCenter,
+        numberY
 end
 
 
 -- ============================================================
--- Speaker test screen
--- V1.3 - preserved
+-- FLOOR NUMBER
+-- Normal CC monitor text.
 -- ============================================================
-
-local function drawSpeakerTest(
-    mon,
-    floor,
-    speakerName
-)
-
-    prepareMonitor(mon)
-
-    local w, h = mon.getSize()
-
-    centerText(
-        mon,
-        "FLOOR " .. floor,
-        2,
-        colors.white
-    )
-
-    centerText(
-        mon,
-        "SPEAKER TEST",
-        4,
-        colors.orange
-    )
-
-    centerText(
-        mon,
-        speakerName,
-        6,
-        colors.lightGray
-    )
-
-    -- Bottom controls
-
-    mon.setTextColor(colors.red)
-    mon.setCursorPos(2, h)
-    mon.write("NO")
-
-    local yesText = "YES"
-
-    mon.setTextColor(colors.lime)
-    mon.setCursorPos(
-        math.max(1, w - #yesText),
-        h
-    )
-    mon.write(yesText)
-end
 
 
 -- ============================================================
--- Test one speaker
--- V1.3 - preserved
+-- DRAW ONE LANDING
 -- ============================================================
 
-local function testSpeaker(
-    floor,
-    monitorName,
-    speakerName
-)
+local function drawDisplay(landingFloor)
 
     local mon =
-        peripheral.wrap(monitorName)
+        getMonitor(landingFloor)
 
-    local speaker =
-        peripheral.wrap(speakerName)
+    if not mon then
+        return
+    end
 
-    drawSpeakerTest(
+
+    mon.setTextScale(TEXT_SCALE)
+    mon.setBackgroundColor(colors.black)
+    mon.clear()
+
+
+    local w, h =
+        mon.getSize()
+
+
+    local leftCenter,
+          rightCenter,
+          numberY =
+        getDisplayPositions(w, h)
+
+
+    -- --------------------------------------------------------
+    -- NUMBER COLOUR
+    -- --------------------------------------------------------
+
+    local numberColour
+
+
+    if state.direction ~= "stopped" then
+
+        numberColour =
+            colors.orange
+
+    elseif state.positionKnown
+    and state.floor == landingFloor then
+
+        numberColour =
+            colors.lime
+
+    else
+
+        numberColour =
+            colors.white
+    end
+
+
+    -- --------------------------------------------------------
+    -- FLOOR NUMBER
+    -- --------------------------------------------------------
+
+    writeCenteredAt(
         mon,
-        floor,
-        speakerName
+        leftCenter,
+        numberY,
+        tostring(state.floor),
+        numberColour
     )
 
 
-    local decision = nil
+    -- --------------------------------------------------------
+    -- MOVEMENT INDICATOR
+    -- --------------------------------------------------------
 
+    if state.direction ~= "stopped" then
 
-    -- Repeatedly play the test tone
-
-    local function soundLoop()
-
-        while decision == nil do
-
-            speaker.playNote(
-                TEST_NOTE_INSTRUMENT,
-                TEST_NOTE_VOLUME,
-                TEST_NOTE_PITCH
+        local arrows =
+            getArrowRows(
+                state.direction,
+                state.animationFrame
             )
 
-            sleep(TEST_NOTE_INTERVAL)
 
-        end
-    end
-
-
-    -- Wait for a touch on THIS floor's monitor
-
-    local function touchLoop()
-
-        while decision == nil do
-
-            local _, touchedMonitor, x =
-                os.pullEvent("monitor_touch")
-
-            if touchedMonitor == monitorName then
-
-                local w, _ = mon.getSize()
-
-                if x <= math.floor(w / 2) then
-                    decision = false
-                else
-                    decision = true
-                end
-
-                return
-            end
-        end
-    end
+        local topRow =
+            numberY - 1
 
 
-    parallel.waitForAny(
-        soundLoop,
-        touchLoop
-    )
+        for i = 1, 3 do
+
+            local row =
+                topRow + (i - 1)
 
 
-    speaker.stop()
+            if row >= 1
+            and row <= h
+            and arrows[i] ~= " " then
 
-    return decision
-end
-
-
--- ============================================================
--- Speaker commissioning
--- V1.3 - preserved
--- ============================================================
-
-local function commissionSpeaker(
-    floor,
-    shaft,
-    monitorName,
-    speakerNames,
-    assignedSpeakers
-)
-
-    clearTerminal()
-
-    print("RuffHouse Lift Commissioning")
-    print("============================")
-    print()
-    print("Shaft: " .. shaft)
-    print("Floor: " .. floor)
-    print()
-    print("SPEAKER SETUP")
-    print()
-    print("Stand beside the Floor " .. floor)
-    print("monitor.")
-    print()
-    print("A speaker will repeatedly")
-    print("play a test tone.")
-    print()
-    print("Tap:")
-    print("  LEFT  = wrong speaker")
-    print("  RIGHT = correct speaker")
-    print()
-
-
-    for _, speakerName in ipairs(speakerNames) do
-
-        if not assignedSpeakers[speakerName] then
-
-            local correct =
-                testSpeaker(
-                    floor,
-                    monitorName,
-                    speakerName
-                )
-
-            if correct then
-
-                assignedSpeakers[speakerName] = true
-
-                local mon =
-                    peripheral.wrap(monitorName)
-
-                showCentered(
+                writeCenteredAt(
                     mon,
-                    "F" .. floor .. " HARDWARE OK",
-                    colors.lime
+                    rightCenter,
+                    row,
+                    arrows[i],
+                    colors.orange
                 )
-
-                return speakerName
-
             end
         end
     end
-
-
-    error(
-        "No speaker assigned to Floor "
-        .. floor
-    )
 end
 
 
 -- ============================================================
--- Save configuration
+-- REFRESH ALL DISPLAYS
 -- ============================================================
 
-local function saveConfig(
-    shaft,
-    floors
-)
-
-    if not fs.exists(CONFIG_DIR) then
-        fs.makeDir(CONFIG_DIR)
-    end
-
-    local file = fs.open(CONFIG_FILE, "w")
-
-    if not file then
-        error("Unable to open " .. CONFIG_FILE)
-    end
-
-    file.writeLine("return {")
-    file.writeLine('    shaft = "' .. shaft .. '",')
-    file.writeLine("")
-    file.writeLine("    floors = {")
+local function refreshDisplays()
 
     for floor = 1, FLOOR_COUNT do
-        file.writeLine("        [" .. floor .. "] = {")
-        file.writeLine(
-            '            monitor = "'
-            .. floors[floor].monitor
-            .. '",'
-        )
-        file.writeLine(
-            '            speaker = "'
-            .. floors[floor].speaker
-            .. '",'
-        )
-        file.writeLine("        },")
+        drawDisplay(floor)
+    end
+end
+
+
+-- ============================================================
+-- STOP ALL SPEAKERS
+-- ============================================================
+
+local function stopAllSpeakers()
+
+    for floor = 1, FLOOR_COUNT do
+
+        local speaker =
+            getSpeaker(floor)
+
+        if speaker then
+            speaker.stop()
+        end
     end
 
-    file.writeLine("    }")
-    file.writeLine("}")
 
-    file.close()
+    state.audioActive = false
+    state.audioSuccess = 0
 end
 
 
 -- ============================================================
--- MAIN
+-- PLAY MOVEMENT SOUND
 -- ============================================================
 
-local shaft = selectShaft()
+local function playMovementSound()
 
-local monitorNames =
-    discoverPeripheralType("monitor")
-
-local speakerNames =
-    discoverPeripheralType("speaker")
+    local successCount = 0
 
 
-clearTerminal()
+    for floor = 1, FLOOR_COUNT do
 
-print("RuffHouse Lift Commissioning")
-print("============================")
-print()
-print("Shaft: " .. shaft)
-print()
+        local speaker =
+            getSpeaker(floor)
 
-print(
-    "Monitors: "
-    .. #monitorNames
-    .. "/"
-    .. FLOOR_COUNT
-)
 
-print(
-    "Speakers: "
-    .. #speakerNames
-    .. "/"
-    .. FLOOR_COUNT
-)
+        if speaker then
 
-print()
+            local success =
+                speaker.playSound(
+                    MOVE_SOUND,
+                    MOVE_VOLUME,
+                    MOVE_PITCH
+                )
+
+
+            if success then
+
+                successCount =
+                    successCount + 1
+            end
+        end
+    end
+
+
+    state.audioActive = true
+    state.audioSuccess = successCount
+end
 
 
 -- ============================================================
--- Hardware validation
+-- ARRIVAL CHIME
 -- ============================================================
 
-if #monitorNames ~= FLOOR_COUNT then
+local function playArrival(floor)
 
-    print("ERROR")
+    local speaker =
+        getSpeaker(floor)
+
+
+    if not speaker then
+        return
+    end
+
+
+    speaker.playNote(
+        ARRIVAL_INSTRUMENT,
+        ARRIVAL_VOLUME,
+        ARRIVAL_PITCH
+    )
+
+
+    sleep(0.15)
+
+
+    speaker.playNote(
+        ARRIVAL_INSTRUMENT,
+        ARRIVAL_VOLUME,
+        ARRIVAL_PITCH + 4
+    )
+end
+
+
+-- ============================================================
+-- TERMINAL UI
+-- ============================================================
+
+local function drawTerminal()
+
+    clearTerminal()
+
+
+    print(
+        "RuffHouse Lift Controller v7.0"
+    )
+
+    print(
+        "============================"
+    )
+
     print()
 
-    print(
-        "Expected "
-        .. FLOOR_COUNT
-        .. " monitors."
-    )
 
     print(
-        "Found "
-        .. #monitorNames
-        .. "."
+        "Shaft: "
+        .. tostring(config.shaft)
     )
 
-    return
-end
 
+    if state.positionKnown then
 
-if #speakerNames ~= FLOOR_COUNT then
-
-    print("ERROR")
-    print()
-
-    print(
-        "Expected "
-        .. FLOOR_COUNT
-        .. " speakers."
-    )
-
-    print(
-        "Found "
-        .. #speakerNames
-        .. "."
-    )
-
-    return
-end
-
-
-print("Hardware count OK.")
-sleep(1.5)
-
-
--- ============================================================
--- Commission floors
---
--- PRESERVED workflow:
---
--- F1 monitor -> F1 speaker
--- F2 monitor -> F2 speaker
--- ...
--- F6 monitor -> F6 speaker
--- ============================================================
-
-local floors = {}
-
-local assignedMonitors = {}
-local assignedSpeakers = {}
-
-
-for floor = 1, FLOOR_COUNT do
-
-    local monitorName =
-        commissionMonitor(
-            floor,
-            shaft,
-            monitorNames,
-            assignedMonitors
-        )
-
-    local speakerName =
-        commissionSpeaker(
-            floor,
-            shaft,
-            monitorName,
-            speakerNames,
-            assignedSpeakers
-        )
-
-    floors[floor] = {
-        monitor = monitorName,
-        speaker = speakerName
-    }
-
-    local mon =
-        peripheral.wrap(monitorName)
-
-    showCentered(
-        mon,
-        "FLOOR " .. floor .. " OK",
-        colors.lime
-    )
-
-    sleep(1.0)
-
-    if floor < FLOOR_COUNT then
-
-        showCentered(
-            mon,
-            "PROCEED TO F" .. (floor + 1),
-            colors.orange
+        print(
+            "Current floor: "
+            .. tostring(state.floor)
         )
 
     else
 
-        prepareMonitor(mon)
+        print(
+            "Current floor: UNKNOWN"
+        )
+    end
 
-        local _, h = mon.getSize()
 
-        centerText(
-            mon,
-            "MON + AUDIO COMPLETE",
-            math.max(1, math.ceil(h / 2) - 1),
-            colors.lime
+    print(
+        "State: "
+        .. string.upper(
+            state.direction
+        )
+    )
+
+    if state.destination then
+
+        print(
+            "Destination: "
+            .. tostring(state.destination)
         )
 
-        centerText(
-            mon,
-            "RETURN TO FLOOR 1",
-            math.min(h, math.ceil(h / 2) + 1),
-            colors.orange
+    else
+
+        print("Destination: NONE")
+    end
+
+
+    print()
+
+
+    if state.direction ~= "stopped" then
+
+        print(
+            "Movement audio: ACTIVE"
         )
+
+        print(
+            "Speakers: "
+            .. tostring(
+                state.audioSuccess
+            )
+            .. "/"
+            .. tostring(
+                FLOOR_COUNT
+            )
+        )
+
+    else
+
+        print(
+            "Movement audio: STOPPED"
+        )
+    end
+
+
+    print()
+
+    print("Sound:")
+    print(MOVE_SOUND)
+
+    print()
+
+    print("CREATE LIFTLINK MODE")
+    print("--------------------")
+    print()
+
+    print(
+        "Peripheral: "
+        .. tostring(state.elevatorName or "UNKNOWN")
+    )
+
+    print(
+        "Create label: "
+        .. tostring(state.createShortName or "")
+        .. " | "
+        .. tostring(state.createLongName or "")
+    )
+
+    print()
+    print("Create owns movement and call buttons.")
+    print("Controller observes only.")
+    print()
+
+    print("Q : Quit")
+end
+
+
+-- ============================================================
+-- FLOOR POSITION
+-- ============================================================
+
+local function setFloor(floor)
+
+    if floor < 1
+    or floor > FLOOR_COUNT then
+        return
+    end
+
+
+    state.floor = floor
+    state.positionKnown = true
+
+
+    refreshDisplays()
+    drawTerminal()
+end
+
+
+-- ============================================================
+-- START MOVEMENT
+-- ============================================================
+
+local function startMovement(direction)
+
+    -- Do not restart movement state if we're already moving
+    -- in the same direction.
+    --
+    -- This prevents duplicate call events from restarting
+    -- the SAG sound.
+
+    if state.direction == direction then
+        return
+    end
+
+
+    -- Kill anything left playing from a previous state.
+
+    stopAllSpeakers()
+
+
+    state.direction = direction
+    state.animationFrame = 1
+
+
+    -- Fire movement audio immediately.
+    --
+    -- Preserved V4 behaviour.
+
+    playMovementSound()
+
+
+    refreshDisplays()
+    drawTerminal()
+end
+
+
+-- ============================================================
+-- STOP MOVEMENT WITHOUT ARRIVAL CHIME
+-- ============================================================
+
+local function stopMovement()
+
+    stopAllSpeakers()
+
+
+    state.direction = "stopped"
+    state.animationFrame = 1
+
+
+    refreshDisplays()
+    drawTerminal()
+end
+
+
+-- ============================================================
+-- ARRIVAL
+-- ============================================================
+
+local function arrive(floor)
+
+    -- --------------------------------------------------------
+    -- ORDER IS IMPORTANT
+    --
+    -- 1. Kill machinery audio.
+    -- 2. Update actual floor.
+    -- 3. Set stopped state.
+    -- 4. Redraw displays.
+    -- 5. Play destination chime.
+    --
+    -- Never stop speakers after playing the bell.
+    -- --------------------------------------------------------
+
+    stopAllSpeakers()
+
+
+    state.floor = floor
+    state.positionKnown = true
+
+    state.direction = "stopped"
+    state.destination = nil
+    state.animationFrame = 1
+
+    state.lastObservedFloor =
+        floor
+
+
+    refreshDisplays()
+    drawTerminal()
+
+
+    playArrival(floor)
+end
+
+
+-- ============================================================
+-- CREATE / CC:LIFTLINK
+-- ============================================================
+
+local function discoverElevator()
+
+    local names = peripheral.getNames()
+    table.sort(names)
+
+    for _, name in ipairs(names) do
+
+        if peripheral.hasType(
+            name,
+            "create_elevator"
+        ) then
+
+            local candidate =
+                peripheral.wrap(name)
+
+            local ok, floors =
+                pcall(candidate.listFloors)
+
+            if ok
+            and type(floors) == "table"
+            and #floors == FLOOR_COUNT then
+
+                return name, candidate
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+
+-- ============================================================
+-- PHYSICAL FLOOR MAP
+--
+-- Create labels are presentation data only.
+--
+-- shortName may be G, B1, etc.
+-- longName may be Foyer, Lab, etc.
+--
+-- Neither is used to identify RuffHouse Floor 1..6.
+--
+-- The shaft's physical orientation is:
+--   RuffHouse 1 -> 6 = DOWN
+--
+-- Therefore Create floors are sorted by Y descending:
+--   highest Y = RuffHouse Floor 1
+--   lowest  Y = RuffHouse Floor 6
+-- ============================================================
+
+local function buildFloorMap(createFloors)
+
+    local ordered = {}
+
+    for _, info in ipairs(createFloors) do
+
+        if type(info.y) ~= "number" then
+            error(
+                "LiftLink floor has no numeric Y coordinate."
+            )
+        end
+
+        table.insert(ordered, info)
+    end
+
+
+    if #ordered ~= FLOOR_COUNT then
+
+        error(
+            "Expected "
+            .. FLOOR_COUNT
+            .. " Create elevator floors; found "
+            .. #ordered
+            .. "."
+        )
+    end
+
+
+    table.sort(
+        ordered,
+        function(a, b)
+            return a.y > b.y
+        end
+    )
+
+
+    local byY = {}
+
+    for floor = 1, FLOOR_COUNT do
+
+        byY[ordered[floor].y] = floor
+    end
+
+
+    return byY
+end
+
+
+local function floorFromY(y)
+
+    if type(y) ~= "number" then
+        return nil
+    end
+
+    return createFloorByY[y]
+end
+
+
+local function readLiftLink()
+
+    local floors =
+        elevator.listFloors()
+
+    local currentFloor = nil
+    local targetFloor = nil
+
+    local currentInfo = nil
+    local targetInfo = nil
+
+
+    for _, info in ipairs(floors) do
+
+        if info.isCurrent then
+
+            currentFloor =
+                floorFromY(info.y)
+
+            currentInfo =
+                info
+        end
+
+
+        if info.isTarget then
+
+            targetFloor =
+                floorFromY(info.y)
+
+            targetInfo =
+                info
+        end
+    end
+
+
+    local moving =
+        elevator.isMoving()
+
+    local speed =
+        elevator.getSpeed()
+
+
+    return {
+        currentFloor = currentFloor,
+        targetFloor = targetFloor,
+
+        currentInfo = currentInfo,
+        targetInfo = targetInfo,
+
+        moving = moving,
+        speed = speed
+    }
+end
+
+
+-- ============================================================
+-- REAL LIFT STATE LOOP
+-- ============================================================
+
+local function stateLoop()
+
+    local wasMoving = false
+    local lastCurrentFloor = nil
+
+
+    -- Initial state comes directly from Create.
+    -- Do not play an arrival chime on controller startup.
+
+    local initial =
+        readLiftLink()
+
+
+    if initial.currentFloor then
+
+        state.floor =
+            initial.currentFloor
+
+        state.positionKnown = true
+
+        state.lastObservedFloor =
+            initial.currentFloor
+
+        lastCurrentFloor =
+            initial.currentFloor
+    end
+
+
+    if initial.currentInfo then
+
+        state.createShortName =
+            initial.currentInfo.shortName
+            or initial.currentInfo.name
+            or ""
+
+        state.createLongName =
+            initial.currentInfo.longName
+            or ""
+    end
+
+
+    state.destination =
+        initial.targetFloor
+
+
+    refreshDisplays()
+    drawTerminal()
+
+
+    while state.running do
+
+        local ok, info =
+            pcall(readLiftLink)
+
+
+        if ok and info then
+
+            if info.currentFloor then
+
+                state.floor =
+                    info.currentFloor
+
+                state.positionKnown =
+                    true
+
+                state.lastObservedFloor =
+                    info.currentFloor
+
+                lastCurrentFloor =
+                    info.currentFloor
+            end
+
+
+            if info.currentInfo then
+
+                state.createShortName =
+                    info.currentInfo.shortName
+                    or info.currentInfo.name
+                    or ""
+
+                state.createLongName =
+                    info.currentInfo.longName
+                    or ""
+            end
+
+
+            if info.targetFloor then
+
+                state.destination =
+                    info.targetFloor
+            end
+
+
+            if info.moving then
+
+                local direction = nil
+
+
+                -- Create Y increases upward.
+                -- RuffHouse 1 -> 6 is downward.
+
+                if type(info.speed) == "number"
+                and info.speed ~= 0 then
+
+                    if info.speed > 0 then
+                        direction = "up"
+                    else
+                        direction = "down"
+                    end
+                end
+
+
+                -- Fallback while Create reports zero speed at the
+                -- beginning/end of a movement transition.
+
+                if not direction
+                and state.destination
+                and state.positionKnown then
+
+                    if state.destination > state.floor then
+                        direction = "down"
+
+                    elseif state.destination < state.floor then
+                        direction = "up"
+                    end
+                end
+
+
+                if direction then
+
+                    if not wasMoving
+                    or state.direction ~= direction then
+
+                        startMovement(direction)
+                    end
+                end
+
+
+                wasMoving = true
+
+
+            else
+
+                if wasMoving then
+
+                    local arrivalFloor =
+                        info.currentFloor
+                        or lastCurrentFloor
+                        or state.destination
+
+
+                    if arrivalFloor then
+                        arrive(arrivalFloor)
+                    else
+                        stopMovement()
+                    end
+
+
+                elseif state.direction ~= "stopped" then
+
+                    stopMovement()
+                end
+
+
+                wasMoving = false
+                state.destination = nil
+            end
+
+
+            refreshDisplays()
+            drawTerminal()
+        end
+
+
+        sleep(LIFTLINK_POLL_INTERVAL)
     end
 end
 
 
 -- ============================================================
--- Save
+-- DISPLAY ANIMATION LOOP
 -- ============================================================
 
-saveConfig(
-    shaft,
-    floors
+local function animationLoop()
+
+    while state.running do
+
+        if state.direction
+            ~= "stopped" then
+
+
+            state.animationFrame =
+                state.animationFrame + 1
+
+
+            if state.animationFrame > 3 then
+
+                state.animationFrame = 1
+            end
+
+
+            refreshDisplays()
+
+
+            sleep(
+                ANIMATION_INTERVAL
+            )
+
+
+        else
+
+            sleep(0.1)
+        end
+    end
+end
+
+
+-- ============================================================
+-- MOVEMENT AUDIO LOOP
+-- ============================================================
+
+local function movementAudioLoop()
+
+    while state.running do
+
+        if state.direction
+            ~= "stopped" then
+
+
+            -- The first sound was already fired immediately
+            -- by startMovement().
+            --
+            -- Wait before retriggering.
+
+            sleep(
+                MOVE_INTERVAL
+            )
+
+
+            -- State may have changed while sleeping.
+            -- CHECK AGAIN before playing anything.
+
+            if state.direction
+                ~= "stopped" then
+
+                playMovementSound()
+
+                drawTerminal()
+            end
+
+
+        else
+
+            sleep(0.1)
+        end
+    end
+end
+
+
+-- ============================================================
+-- KEYBOARD LOOP
+--
+-- No mock lift controls anymore.
+--
+-- Keyboard exists solely so Q can shut down the controller
+-- cleanly.
+-- ============================================================
+
+local function keyboardLoop()
+
+    while state.running do
+
+        local _, key =
+            os.pullEvent("key")
+
+
+        if key == keys.q then
+
+            state.running = false
+
+            return
+        end
+    end
+end
+
+
+-- ============================================================
+-- STARTUP
+-- ============================================================
+
+
+elevatorName,
+elevator =
+    discoverElevator()
+
+
+if not elevator then
+
+    error(
+        "No CC:LiftLink create_elevator peripheral "
+        .. "with exactly "
+        .. FLOOR_COUNT
+        .. " floors found."
+    )
+end
+
+
+state.elevatorName =
+    elevatorName
+
+
+local startupFloors =
+    elevator.listFloors()
+
+
+createFloorByY =
+    buildFloorMap(startupFloors)
+
+
+
+stopAllSpeakers()
+
+
+-- Initial monitor/terminal rendering happens inside stateLoop
+-- after LiftLink has supplied the real physical position.
+
+
+-- ============================================================
+-- RUN
+-- ============================================================
+
+parallel.waitForAny(
+    stateLoop,
+    keyboardLoop,
+    animationLoop,
+    movementAudioLoop
 )
 
 
 -- ============================================================
--- Final displays
+-- SHUTDOWN
 -- ============================================================
 
-for floor = 1, FLOOR_COUNT do
-
-    local mon =
-        peripheral.wrap(
-            floors[floor].monitor
-        )
-
-    showCentered(
-        mon,
-        "FLOOR " .. floor,
-        colors.lime
-    )
-end
+state.running = false
+state.direction = "stopped"
 
 
--- ============================================================
--- Results
--- ============================================================
+stopAllSpeakers()
+
 
 clearTerminal()
 
-print("Commissioning Complete")
-print("======================")
-print()
-print("Lift Shaft: " .. shaft)
-print()
 
-for floor = 1, FLOOR_COUNT do
+print(
+    "RuffHouse Lift Controller v7.0"
+)
 
-    print("Floor " .. floor)
-
-    print(
-        "  Monitor: "
-        .. floors[floor].monitor
-    )
-
-    print(
-        "  Speaker: "
-        .. floors[floor].speaker
-    )
-end
+print(
+    "============================"
+)
 
 print()
-print("Configuration saved:")
-print(CONFIG_FILE)
-print()
-print("All landing HMI hardware mapped.")
+
+print(
+    "Controller stopped."
+)
