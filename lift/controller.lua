@@ -1,41 +1,56 @@
 -- ============================================================
--- RuffHouse Lift Controller
--- MOCK / DISPLAY TEST VERSION
+-- RuffHouse Lift Controller v2
+-- MOCK / DISPLAY + AUDIO TEST
 --
--- Tests:
---   - Floor indicators
---   - Movement indicators
---   - Arrival indication
---   - Movement audio
---   - Arrival chime
+-- Display:
+--   LEFT  = current floor
+--   RIGHT = animated direction chevrons
+--
+-- Colours:
+--   WHITE  = lift stopped elsewhere
+--   LIME   = lift stopped at this landing
+--   ORANGE = lift moving
+--
+-- Audio:
+--   Movement pulse on ALL floors
+--   Arrival chime on destination floor only
 --
 -- Uses:
 --   /lift/config.lua
 --
--- NO REDSTONE CONTROL YET
+-- NO REAL REDSTONE CONTROL YET
 -- ============================================================
 
 local CONFIG_FILE = "/lift/config.lua"
-
 local FLOOR_COUNT = 6
 
--- Display settings
+-- ============================================================
+-- DISPLAY SETTINGS
+-- ============================================================
+
 local TEXT_SCALE = 2
 
--- Movement sound settings
-local MOVE_INTERVAL = 0.80
-local MOVE_INSTRUMENT = "basedrum"
-local MOVE_VOLUME = 0.25
-local MOVE_PITCH = 5
+-- Animation speed in seconds
+local ANIMATION_INTERVAL = 0.25
 
--- Arrival sound settings
+-- ============================================================
+-- AUDIO SETTINGS
+-- ============================================================
+
+-- Movement sound
+local MOVE_INTERVAL = 0.75
+local MOVE_INSTRUMENT = "basedrum"
+local MOVE_VOLUME = 1
+local MOVE_PITCH = 6
+
+-- Arrival sound
 local ARRIVAL_INSTRUMENT = "bell"
-local ARRIVAL_VOLUME = 1
+local ARRIVAL_VOLUME = 3
 local ARRIVAL_PITCH = 12
 
 
 -- ============================================================
--- Load configuration
+-- LOAD CONFIGURATION
 -- ============================================================
 
 if not fs.exists(CONFIG_FILE) then
@@ -57,32 +72,30 @@ end
 
 
 -- ============================================================
--- State
+-- STATE
 -- ============================================================
 
 local state = {
     floor = 1,
     direction = "stopped",
+    animationFrame = 1,
     running = true
 }
 
 
 -- ============================================================
--- Utility functions
+-- PERIPHERAL HELPERS
 -- ============================================================
 
-local function clearTerminal()
-    term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.white)
-    term.clear()
-    term.setCursorPos(1, 1)
-end
-
-
 local function getMonitor(floor)
+
     local floorConfig = config.floors[floor]
 
     if not floorConfig then
+        return nil
+    end
+
+    if not floorConfig.monitor then
         return nil
     end
 
@@ -93,9 +106,14 @@ end
 
 
 local function getSpeaker(floor)
+
     local floorConfig = config.floors[floor]
 
     if not floorConfig then
+        return nil
+    end
+
+    if not floorConfig.speaker then
         return nil
     end
 
@@ -105,18 +123,35 @@ local function getSpeaker(floor)
 end
 
 
-local function centerText(
+-- ============================================================
+-- TERMINAL HELPERS
+-- ============================================================
+
+local function clearTerminal()
+
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+
+    term.clear()
+    term.setCursorPos(1, 1)
+end
+
+
+-- ============================================================
+-- MONITOR DRAWING HELPERS
+-- ============================================================
+
+local function writeCenteredAt(
     mon,
-    text,
+    centerX,
     y,
+    text,
     colour
 )
 
-    local w, _ = mon.getSize()
-
     local x =
         math.floor(
-            (w - #text) / 2
+            centerX - (#text / 2)
         ) + 1
 
     mon.setTextColor(
@@ -133,7 +168,66 @@ end
 
 
 -- ============================================================
--- Draw one landing display
+-- DIRECTION ANIMATION
+-- ============================================================
+
+local function getArrowRows(
+    direction,
+    frame
+)
+
+    if direction == "up" then
+
+        if frame == 1 then
+            return {
+                "^",
+                " "
+            }
+
+        elseif frame == 2 then
+            return {
+                "^",
+                "^"
+            }
+
+        else
+            return {
+                " ",
+                "^"
+            }
+        end
+
+    elseif direction == "down" then
+
+        if frame == 1 then
+            return {
+                "v",
+                " "
+            }
+
+        elseif frame == 2 then
+            return {
+                "v",
+                "v"
+            }
+
+        else
+            return {
+                " ",
+                "v"
+            }
+        end
+    end
+
+    return {
+        " ",
+        " "
+    }
+end
+
+
+-- ============================================================
+-- DRAW ONE LANDING DISPLAY
 -- ============================================================
 
 local function drawDisplay(
@@ -153,29 +247,52 @@ local function drawDisplay(
     mon.clear()
 
 
-    local _, h = mon.getSize()
+    local w, h =
+        mon.getSize()
 
 
     -- --------------------------------------------------------
-    -- Determine colour
+    -- Split monitor into left/right regions
+    -- --------------------------------------------------------
+
+    local leftCenter =
+        math.floor(w * 0.28)
+
+    local rightCenter =
+        math.floor(w * 0.72)
+
+
+    -- --------------------------------------------------------
+    -- Vertical centre
+    -- --------------------------------------------------------
+
+    local centerY =
+        math.max(
+            1,
+            math.ceil(h / 2)
+        )
+
+
+    -- --------------------------------------------------------
+    -- Determine floor number colour
     -- --------------------------------------------------------
 
     local numberColour
 
     if state.direction ~= "stopped" then
 
-        -- Lift moving
-        numberColour = colors.orange
+        numberColour =
+            colors.orange
 
     elseif state.floor == landingFloor then
 
-        -- Lift stopped here
-        numberColour = colors.lime
+        numberColour =
+            colors.lime
 
     else
 
-        -- Lift stopped elsewhere
-        numberColour = colors.white
+        numberColour =
+            colors.white
 
     end
 
@@ -184,51 +301,62 @@ local function drawDisplay(
     -- Floor number
     -- --------------------------------------------------------
 
-    local numberText =
-        tostring(state.floor)
-
-    local numberY =
-        math.max(
-            1,
-            math.floor(h / 2)
-        )
-
-    centerText(
+    writeCenteredAt(
         mon,
-        numberText,
-        numberY,
+        leftCenter,
+        centerY,
+        tostring(state.floor),
         numberColour
     )
 
 
     -- --------------------------------------------------------
-    -- Direction indicator
+    -- Animated movement indicator
     -- --------------------------------------------------------
 
-    if state.direction == "up" then
+    if state.direction ~= "stopped" then
 
-        centerText(
+        local arrows =
+            getArrowRows(
+                state.direction,
+                state.animationFrame
+            )
+
+        local firstRow =
+            math.max(
+                1,
+                centerY - 1
+            )
+
+        local secondRow =
+            math.min(
+                h,
+                centerY + 1
+            )
+
+
+        writeCenteredAt(
             mon,
-            "^",
-            math.min(h, numberY + 1),
+            rightCenter,
+            firstRow,
+            arrows[1],
             colors.orange
         )
 
-    elseif state.direction == "down" then
 
-        centerText(
+        writeCenteredAt(
             mon,
-            "v",
-            math.min(h, numberY + 1),
+            rightCenter,
+            secondRow,
+            arrows[2],
             colors.orange
         )
-
     end
 end
 
 
 -- ============================================================
--- Refresh all landing displays
+-- REFRESH ALL DISPLAYS
 -- ============================================================
 
 local function refreshDisplays()
@@ -240,28 +368,7 @@ end
 
 
 -- ============================================================
--- Arrival chime
--- ============================================================
-
-local function playArrival(floor)
-
-    local speaker =
-        getSpeaker(floor)
-
-    if not speaker then
-        return
-    end
-
-    speaker.playNote(
-        ARRIVAL_INSTRUMENT,
-        ARRIVAL_VOLUME,
-        ARRIVAL_PITCH
-    )
-end
-
-
--- ============================================================
--- Movement sound
+-- AUDIO
 -- ============================================================
 
 local function playMovementPulse()
@@ -278,22 +385,49 @@ local function playMovementPulse()
                 MOVE_VOLUME,
                 MOVE_PITCH
             )
-
         end
     end
 end
 
 
+local function playArrival(floor)
+
+    local speaker =
+        getSpeaker(floor)
+
+    if not speaker then
+        return
+    end
+
+
+    -- Two-note lift chime
+
+    speaker.playNote(
+        ARRIVAL_INSTRUMENT,
+        ARRIVAL_VOLUME,
+        ARRIVAL_PITCH
+    )
+
+    sleep(0.15)
+
+    speaker.playNote(
+        ARRIVAL_INSTRUMENT,
+        ARRIVAL_VOLUME,
+        ARRIVAL_PITCH + 4
+    )
+end
+
+
 -- ============================================================
--- Terminal UI
+-- TERMINAL UI
 -- ============================================================
 
 local function drawTerminal()
 
     clearTerminal()
 
-    print("RuffHouse Lift Controller")
-    print("=========================")
+    print("RuffHouse Lift Controller v2")
+    print("============================")
     print()
 
     print(
@@ -305,7 +439,7 @@ local function drawTerminal()
 
     print(
         "Current floor: "
-        .. state.floor
+        .. tostring(state.floor)
     )
 
     print(
@@ -319,18 +453,20 @@ local function drawTerminal()
     print("MOCK CONTROLS")
     print("-------------")
     print()
+
     print("1-6 : Set current floor")
     print("U   : Moving UP")
     print("D   : Moving DOWN")
-    print("S   : Stop at current floor")
-    print("A   : Arrival test")
+    print("S   : Stop (no chime)")
+    print("A   : Arrive + chime")
     print("Q   : Quit")
+
     print()
 end
 
 
 -- ============================================================
--- State functions
+-- STATE CONTROL
 -- ============================================================
 
 local function setFloor(floor)
@@ -351,6 +487,8 @@ local function setDirection(direction)
 
     state.direction = direction
 
+    state.animationFrame = 1
+
     refreshDisplays()
     drawTerminal()
 end
@@ -359,19 +497,19 @@ end
 local function arrive()
 
     state.direction = "stopped"
+    state.animationFrame = 1
 
     refreshDisplays()
+    drawTerminal()
 
     playArrival(
         state.floor
     )
-
-    drawTerminal()
 end
 
 
 -- ============================================================
--- Keyboard control loop
+-- KEYBOARD INPUT LOOP
 -- ============================================================
 
 local function inputLoop()
@@ -381,7 +519,10 @@ local function inputLoop()
         local _, key =
             os.pullEvent("key")
 
-        -- Floors 1-6
+
+        -- ----------------------------------------------------
+        -- FLOOR POSITION TEST
+        -- ----------------------------------------------------
 
         if key == keys.one then
             setFloor(1)
@@ -402,7 +543,9 @@ local function inputLoop()
             setFloor(6)
 
 
-        -- Movement
+        -- ----------------------------------------------------
+        -- MOVEMENT TEST
+        -- ----------------------------------------------------
 
         elseif key == keys.u then
             setDirection("up")
@@ -414,18 +557,21 @@ local function inputLoop()
             setDirection("stopped")
 
 
-        -- Arrival test
+        -- ----------------------------------------------------
+        -- ARRIVAL TEST
+        -- ----------------------------------------------------
 
         elseif key == keys.a then
             arrive()
 
 
-        -- Quit
+        -- ----------------------------------------------------
+        -- QUIT
+        -- ----------------------------------------------------
 
         elseif key == keys.q then
 
             state.running = false
-
             return
         end
     end
@@ -433,7 +579,38 @@ end
 
 
 -- ============================================================
--- Movement audio loop
+-- DISPLAY ANIMATION LOOP
+-- ============================================================
+
+local function animationLoop()
+
+    while state.running do
+
+        if state.direction ~= "stopped" then
+
+            state.animationFrame =
+                state.animationFrame + 1
+
+            if state.animationFrame > 3 then
+                state.animationFrame = 1
+            end
+
+            refreshDisplays()
+
+            sleep(
+                ANIMATION_INTERVAL
+            )
+
+        else
+
+            sleep(0.1)
+        end
+    end
+end
+
+
+-- ============================================================
+-- MOVEMENT AUDIO LOOP
 -- ============================================================
 
 local function movementAudioLoop()
@@ -444,19 +621,20 @@ local function movementAudioLoop()
 
             playMovementPulse()
 
-            sleep(MOVE_INTERVAL)
+            sleep(
+                MOVE_INTERVAL
+            )
 
         else
 
             sleep(0.1)
-
         end
     end
 end
 
 
 -- ============================================================
--- Startup
+-- STARTUP
 -- ============================================================
 
 refreshDisplays()
@@ -464,18 +642,21 @@ drawTerminal()
 
 
 -- ============================================================
--- Run
+-- RUN CONTROLLER
 -- ============================================================
 
 parallel.waitForAny(
     inputLoop,
+    animationLoop,
     movementAudioLoop
 )
 
 
 -- ============================================================
--- Shutdown
+-- SHUTDOWN
 -- ============================================================
+
+state.running = false
 
 for floor = 1, FLOOR_COUNT do
 
@@ -490,7 +671,7 @@ end
 
 clearTerminal()
 
-print("RuffHouse Lift Controller")
-print("=========================")
+print("RuffHouse Lift Controller v2")
+print("============================")
 print()
 print("Controller stopped.")
