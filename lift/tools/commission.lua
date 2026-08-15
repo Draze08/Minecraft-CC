@@ -1,685 +1,561 @@
 -- ============================================================
--- RuffHouse Lift Commissioning Tool
--- CC:Tweaked
+-- RuffHouse Lift Commissioning Tool v3
 --
--- Configures:
---   - Shaft ID
---   - Floor monitor
---   - Floor speaker
+-- Commissions:
+--   1. Floor monitors
+--   2. Floor speakers
+--   3. Floor arrival/status relays
 --
--- Saves:
---   /lift/config.lua
+-- Relay commissioning:
+--   Press the requested floor's physical call button.
+--   Short relay pulses are treated as the lift passing a floor.
+--   A sustained relay signal is treated as arrival.
+--
+-- RuffHouse Minecraft-CC
 -- ============================================================
 
 local FLOOR_COUNT = 6
+local ARRIVAL_HOLD_TIME = 1.0
+local POLL_INTERVAL = 0.05
 
-local CONFIG_DIR = "/lift"
-local CONFIG_FILE = "/lift/config.lua"
-
-local TEST_NOTE_INTERVAL = 0.75
-local TEST_NOTE_INSTRUMENT = "bell"
-local TEST_NOTE_VOLUME = 1
-local TEST_NOTE_PITCH = 12
-
+local CONFIG_PATH = "/lift/config.lua"
 
 -- ============================================================
--- General utilities
+-- TERMINAL HELPERS
 -- ============================================================
 
-local function clearTerminal()
+local function clear()
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.clear()
     term.setCursorPos(1, 1)
 end
 
+local function header(title)
+    clear()
 
-local function centerText(mon, text, y, colour)
-    local w, h = mon.getSize()
+    term.setTextColor(colors.yellow)
+    print(title)
 
-    local x = math.floor((w - #text) / 2) + 1
-
-    mon.setTextColor(colour or colors.white)
-    mon.setCursorPos(math.max(1, x), y or math.ceil(h / 2))
-    mon.write(text)
+    term.setTextColor(colors.white)
+    print(string.rep("=", #title))
+    print()
 end
 
+local function waitForEnter()
+    term.setTextColor(colors.yellow)
+    print()
+    print("Press ENTER to continue")
 
-local function prepareMonitor(mon)
-    mon.setTextScale(1)
-    mon.setBackgroundColor(colors.black)
-    mon.setTextColor(colors.white)
-    mon.clear()
-end
-
-
-local function showCentered(mon, text, colour)
-    prepareMonitor(mon)
-
-    local _, h = mon.getSize()
-
-    centerText(
-        mon,
-        text,
-        math.ceil(h / 2),
-        colour
-    )
-end
-
-
--- ============================================================
--- Shaft selection
--- ============================================================
-
-local function selectShaft()
+    term.setTextColor(colors.white)
 
     while true do
+        local _, key = os.pullEvent("key")
 
-        clearTerminal()
-
-        print("RuffHouse Lift Commissioning")
-        print("============================")
-        print()
-        print("Select lift shaft:")
-        print()
-        print("  A")
-        print("  B")
-        print("  C")
-        print("  D")
-        print()
-        write("Shaft: ")
-
-        local input = string.upper(read())
-
-        if input == "A"
-        or input == "B"
-        or input == "C"
-        or input == "D" then
-            return input
+        if key == keys.enter then
+            return
         end
-
-        print()
-        print("Invalid shaft.")
-        sleep(1.5)
     end
 end
 
+local function waitForMonitorTouch()
+    while true do
+        local event, side = os.pullEvent()
+
+        if event == "monitor_touch" then
+            return side
+        end
+    end
+end
 
 -- ============================================================
--- Peripheral discovery
+-- DISCOVERY
 -- ============================================================
 
-local function discoverPeripheralType(targetType)
-
-    local results = {}
+local function getPeripheralsOfType(wantedType)
+    local result = {}
 
     for _, name in ipairs(peripheral.getNames()) do
-
-        if peripheral.getType(name) == targetType then
-            table.insert(results, name)
-        end
-
-    end
-
-    table.sort(results)
-
-    return results
-end
-
-
--- ============================================================
--- Monitor commissioning
--- ============================================================
-
-local function commissionMonitor(
-    floor,
-    shaft,
-    monitorNames,
-    assignedMonitors
-)
-
-    -- Display prompt on all currently unassigned monitors
-
-    for _, name in ipairs(monitorNames) do
-
-        if not assignedMonitors[name] then
-
-            local mon = peripheral.wrap(name)
-
-            showCentered(
-                mon,
-                "TOUCH FOR F" .. floor,
-                colors.orange
-            )
-
+        if peripheral.getType(name) == wantedType then
+            result[#result + 1] = name
         end
     end
 
+    table.sort(result)
 
-    clearTerminal()
-
-    print("RuffHouse Lift Commissioning")
-    print("============================")
-    print()
-    print("Shaft: " .. shaft)
-    print("Floor: " .. floor)
-    print()
-    print("MONITOR SETUP")
-    print()
-    print("Touch the landing monitor")
-    print("on Floor " .. floor .. ".")
-    print()
-
-
-    while true do
-
-        local _, monitorName =
-            os.pullEvent("monitor_touch")
-
-        if not assignedMonitors[monitorName] then
-
-            assignedMonitors[monitorName] = true
-
-            local mon =
-                peripheral.wrap(monitorName)
-
-            showCentered(
-                mon,
-                "F" .. floor .. " MONITOR OK",
-                colors.lime
-            )
-
-            return monitorName
-
-        end
-    end
+    return result
 end
 
+local monitors = getPeripheralsOfType("monitor")
+local speakers = getPeripheralsOfType("speaker")
+local relays = getPeripheralsOfType("redstone_relay")
 
 -- ============================================================
--- Speaker test screen
+-- HARDWARE CHECK
 -- ============================================================
 
-local function drawSpeakerTest(
-    mon,
-    floor,
-    speakerName
-)
+header("RuffHouse Lift Commissioning")
 
-    prepareMonitor(mon)
-
-    local w, h = mon.getSize()
-
-    centerText(
-        mon,
-        "FLOOR " .. floor,
-        2,
-        colors.white
-    )
-
-    centerText(
-        mon,
-        "SPEAKER TEST",
-        4,
-        colors.orange
-    )
-
-    centerText(
-        mon,
-        speakerName,
-        6,
-        colors.lightGray
-    )
-
-    -- Bottom controls
-
-    mon.setTextColor(colors.red)
-    mon.setCursorPos(2, h)
-    mon.write("NO")
-
-    local yesText = "YES"
-
-    mon.setTextColor(colors.lime)
-    mon.setCursorPos(
-        math.max(1, w - #yesText),
-        h
-    )
-    mon.write(yesText)
-end
-
-
--- ============================================================
--- Test one speaker
--- ============================================================
-
-local function testSpeaker(
-    floor,
-    monitorName,
-    speakerName
-)
-
-    local mon =
-        peripheral.wrap(monitorName)
-
-    local speaker =
-        peripheral.wrap(speakerName)
-
-    drawSpeakerTest(
-        mon,
-        floor,
-        speakerName
-    )
-
-
-    local decision = nil
-
-
-    -- Repeatedly play the test tone
-
-    local function soundLoop()
-
-        while decision == nil do
-
-            speaker.playNote(
-                TEST_NOTE_INSTRUMENT,
-                TEST_NOTE_VOLUME,
-                TEST_NOTE_PITCH
-            )
-
-            sleep(TEST_NOTE_INTERVAL)
-
-        end
-    end
-
-
-    -- Wait for a touch on THIS floor's monitor
-
-    local function touchLoop()
-
-        while decision == nil do
-
-            local _, touchedMonitor, x =
-                os.pullEvent("monitor_touch")
-
-            if touchedMonitor == monitorName then
-
-                local w, _ = mon.getSize()
-
-                if x <= math.floor(w / 2) then
-                    decision = false
-                else
-                    decision = true
-                end
-
-                return
-            end
-        end
-    end
-
-
-    parallel.waitForAny(
-        soundLoop,
-        touchLoop
-    )
-
-
-    speaker.stop()
-
-    return decision
-end
-
-
--- ============================================================
--- Speaker commissioning
--- ============================================================
-
-local function commissionSpeaker(
-    floor,
-    shaft,
-    monitorName,
-    speakerNames,
-    assignedSpeakers
-)
-
-    clearTerminal()
-
-    print("RuffHouse Lift Commissioning")
-    print("============================")
-    print()
-    print("Shaft: " .. shaft)
-    print("Floor: " .. floor)
-    print()
-    print("SPEAKER SETUP")
-    print()
-    print("Stand beside the Floor " .. floor)
-    print("monitor.")
-    print()
-    print("A speaker will repeatedly")
-    print("play a test tone.")
-    print()
-    print("Tap:")
-    print("  LEFT  = wrong speaker")
-    print("  RIGHT = correct speaker")
-    print()
-
-
-    for _, speakerName in ipairs(speakerNames) do
-
-        if not assignedSpeakers[speakerName] then
-
-            local correct =
-                testSpeaker(
-                    floor,
-                    monitorName,
-                    speakerName
-                )
-
-            if correct then
-
-                assignedSpeakers[speakerName] = true
-
-                local mon =
-                    peripheral.wrap(monitorName)
-
-                showCentered(
-                    mon,
-                    "F" .. floor .. " HARDWARE OK",
-                    colors.lime
-                )
-
-                return speakerName
-
-            end
-        end
-    end
-
-
-    error(
-        "No speaker assigned to Floor "
-        .. floor
-    )
-end
-
-
--- ============================================================
--- Save configuration
--- ============================================================
-
-local function saveConfig(
-    shaft,
-    floors
-)
-
-    if not fs.exists(CONFIG_DIR) then
-        fs.makeDir(CONFIG_DIR)
-    end
-
-
-    local file =
-        fs.open(CONFIG_FILE, "w")
-
-    if not file then
-        error(
-            "Unable to open "
-            .. CONFIG_FILE
-        )
-    end
-
-
-    file.writeLine("return {")
-    file.writeLine(
-        '    shaft = "' .. shaft .. '",'
-    )
-    file.writeLine("")
-    file.writeLine("    floors = {")
-
-
-    for floor = 1, FLOOR_COUNT do
-
-        file.writeLine(
-            "        [" .. floor .. "] = {"
-        )
-
-        file.writeLine(
-            '            monitor = "'
-            .. floors[floor].monitor
-            .. '",'
-        )
-
-        file.writeLine(
-            '            speaker = "'
-            .. floors[floor].speaker
-            .. '",'
-        )
-
-        file.writeLine(
-            "        },"
-        )
-
-    end
-
-
-    file.writeLine("    }")
-    file.writeLine("}")
-
-    file.close()
-end
-
-
--- ============================================================
--- MAIN
--- ============================================================
-
-local shaft = selectShaft()
-
-local monitorNames =
-    discoverPeripheralType("monitor")
-
-local speakerNames =
-    discoverPeripheralType("speaker")
-
-
-clearTerminal()
-
-print("RuffHouse Lift Commissioning")
-print("============================")
+print("Hardware detected:")
 print()
-print("Shaft: " .. shaft)
-print()
-print(
-    "Monitors: "
-    .. #monitorNames
-    .. "/"
-    .. FLOOR_COUNT
-)
 
-print(
-    "Speakers: "
-    .. #speakerNames
-    .. "/"
-    .. FLOOR_COUNT
-)
+print("Monitors: " .. #monitors .. "/" .. FLOOR_COUNT)
+print("Speakers: " .. #speakers .. "/" .. FLOOR_COUNT)
+print("Relays:   " .. #relays .. "/" .. FLOOR_COUNT)
 
 print()
 
+if #monitors ~= FLOOR_COUNT
+or #speakers ~= FLOOR_COUNT
+or #relays ~= FLOOR_COUNT then
 
--- ============================================================
--- Hardware validation
--- ============================================================
-
-if #monitorNames ~= FLOOR_COUNT then
-
-    print("ERROR")
+    term.setTextColor(colors.red)
+    print("Hardware check FAILED.")
     print()
-    print(
-        "Expected "
-        .. FLOOR_COUNT
-        .. " monitors."
-    )
 
-    print(
-        "Found "
-        .. #monitorNames
-        .. "."
-    )
+    term.setTextColor(colors.white)
+    print("Commissioning requires exactly:")
+    print("  6 monitors")
+    print("  6 speakers")
+    print("  6 redstone relays")
 
     return
 end
 
+term.setTextColor(colors.lime)
+print("Hardware check OK.")
 
-if #speakerNames ~= FLOOR_COUNT then
+term.setTextColor(colors.white)
 
-    print("ERROR")
-    print()
-    print(
-        "Expected "
-        .. FLOOR_COUNT
-        .. " speakers."
-    )
+waitForEnter()
 
-    print(
-        "Found "
-        .. #speakerNames
-        .. "."
-    )
+-- ============================================================
+-- CONFIG DATA
+-- ============================================================
 
-    return
+local config = {
+    shaft = "A",
+    arrivalHoldTime = ARRIVAL_HOLD_TIME,
+    floors = {}
+}
+
+for floor = 1, FLOOR_COUNT do
+    config.floors[floor] = {}
 end
 
-
-print("Hardware count OK.")
-sleep(1.5)
-
-
--- ============================================================
--- Commission floors
--- ============================================================
-
-local floors = {}
-
+-- Keep track of already assigned peripherals.
 local assignedMonitors = {}
 local assignedSpeakers = {}
+local assignedRelays = {}
 
+-- ============================================================
+-- MONITOR COMMISSIONING
+-- ============================================================
 
 for floor = 1, FLOOR_COUNT do
 
-    -- --------------------------------------------------------
-    -- Identify this floor's monitor
-    -- --------------------------------------------------------
+    header("Floor " .. floor .. " - Monitor")
 
-    local monitorName =
-        commissionMonitor(
-            floor,
-            shaft,
-            monitorNames,
-            assignedMonitors
-        )
+    print("Tap the monitor located")
+    print("on Floor " .. floor .. ".")
+    print()
+    print("Waiting for touch...")
 
+    while true do
+        local name = waitForMonitorTouch()
 
-    -- --------------------------------------------------------
-    -- Identify this floor's speaker
-    -- --------------------------------------------------------
+        if peripheral.getType(name) == "monitor" then
 
-    local speakerName =
-        commissionSpeaker(
-            floor,
-            shaft,
-            monitorName,
-            speakerNames,
-            assignedSpeakers
-        )
+            if assignedMonitors[name] then
+                term.setTextColor(colors.red)
+                print()
+                print(name .. " is already assigned.")
+                print("Tap the correct monitor.")
 
+                term.setTextColor(colors.white)
 
-    -- --------------------------------------------------------
-    -- Store floor hardware
-    -- --------------------------------------------------------
+            else
+                config.floors[floor].monitor = name
+                assignedMonitors[name] = true
 
-    floors[floor] = {
+                term.setTextColor(colors.lime)
+                print()
+                print("Detected: " .. name)
 
-        monitor = monitorName,
-        speaker = speakerName
+                term.setTextColor(colors.white)
 
-    }
-
-
-    -- --------------------------------------------------------
-    -- Confirmation
-    -- --------------------------------------------------------
-
-    local mon =
-        peripheral.wrap(monitorName)
-
-    showCentered(
-        mon,
-        "FLOOR " .. floor .. " OK",
-        colors.lime
-    )
-
-    sleep(0.5)
+                sleep(0.7)
+                break
+            end
+        end
+    end
 end
 
+-- ============================================================
+-- SPEAKER HELPERS
+-- ============================================================
+
+local function stopAllSpeakerSounds()
+    for _, name in ipairs(speakers) do
+        local speaker = peripheral.wrap(name)
+
+        if speaker then
+            pcall(function()
+                speaker.stop()
+            end)
+        end
+    end
+end
+
+local function playSpeakerTest(name)
+    local speaker = peripheral.wrap(name)
+
+    if not speaker then
+        return
+    end
+
+    -- Repeat until user answers.
+    parallel.waitForAny(
+
+        function()
+            while true do
+                speaker.playNote("pling", 1, 12)
+                sleep(0.6)
+            end
+        end,
+
+        function()
+            os.pullEvent("speaker_test_stop")
+        end
+    )
+end
 
 -- ============================================================
--- Save
+-- SPEAKER COMMISSIONING
 -- ============================================================
 
-saveConfig(
-    shaft,
-    floors
+for floor = 1, FLOOR_COUNT do
+
+    local candidates = {}
+
+    for _, name in ipairs(speakers) do
+        if not assignedSpeakers[name] then
+            candidates[#candidates + 1] = name
+        end
+    end
+
+    local selected = nil
+
+    for _, candidate in ipairs(candidates) do
+
+        header("Floor " .. floor .. " - Speaker")
+
+        print("Testing:")
+        print(candidate)
+        print()
+        print("Do you hear this sound")
+        print("on Floor " .. floor .. "?")
+        print()
+
+        term.setTextColor(colors.red)
+        print("[ N ] NO")
+
+        term.setTextColor(colors.lime)
+        print("[ Y ] YES")
+
+        term.setTextColor(colors.white)
+
+        local speaker = peripheral.wrap(candidate)
+
+        local function soundLoop()
+            while true do
+                if speaker then
+                    speaker.playNote("pling", 1, 12)
+                end
+
+                sleep(0.6)
+            end
+        end
+
+        local function inputLoop()
+            while true do
+                local _, key = os.pullEvent("key")
+
+                if key == keys.y then
+                    selected = candidate
+                    return
+                elseif key == keys.n then
+                    return
+                end
+            end
+        end
+
+        parallel.waitForAny(soundLoop, inputLoop)
+
+        stopAllSpeakerSounds()
+
+        if selected then
+            break
+        end
+    end
+
+    if not selected then
+        header("Speaker Commissioning Failed")
+
+        term.setTextColor(colors.red)
+        print("No speaker selected for Floor " .. floor .. ".")
+
+        term.setTextColor(colors.white)
+        return
+    end
+
+    config.floors[floor].speaker = selected
+    assignedSpeakers[selected] = true
+end
+
+-- ============================================================
+-- RELAY HELPERS
+-- ============================================================
+
+local relaySides = {
+    "top",
+    "bottom",
+    "left",
+    "right",
+    "front",
+    "back"
+}
+
+local function relayActive(name)
+    local relay = peripheral.wrap(name)
+
+    if not relay then
+        return false
+    end
+
+    -- We do not care which physical side of the relay receives
+    -- the signal. Any powered side means this relay is active.
+    for _, side in ipairs(relaySides) do
+        local ok, value = pcall(function()
+            return relay.getInput(side)
+        end)
+
+        if ok and value then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function allRelaysReleased()
+    for _, name in ipairs(relays) do
+        if relayActive(name) then
+            return false
+        end
+    end
+
+    return true
+end
+
+local function waitForAllRelaysReleased()
+    while not allRelaysReleased() do
+        sleep(POLL_INTERVAL)
+    end
+end
+
+-- ============================================================
+-- RELAY COMMISSIONING
+-- ============================================================
+
+for floor = 1, FLOOR_COUNT do
+
+    header("Floor " .. floor .. " - Status")
+
+    print("Push the FLOOR " .. floor)
+    print("physical call button.")
+    print()
+    print("The lift may trigger short")
+    print("signals while passing floors.")
+    print()
+    print("Short pulses will be ignored.")
+    print(
+        "Arrival >= "
+        .. string.format("%.1f", ARRIVAL_HOLD_TIME)
+        .. " sec"
+    )
+    print()
+
+    term.setTextColor(colors.yellow)
+    print("Waiting for lift...")
+
+    term.setTextColor(colors.white)
+
+    -- Avoid treating a signal which was already active when
+    -- commissioning began as a new arrival.
+    waitForAllRelaysReleased()
+
+    local accepted = nil
+    local previous = {}
+
+    for _, name in ipairs(relays) do
+        previous[name] = false
+    end
+
+    while not accepted do
+
+        for _, name in ipairs(relays) do
+
+            if not assignedRelays[name] then
+
+                local active = relayActive(name)
+
+                -- New rising edge.
+                if active and not previous[name] then
+
+                    local started = os.clock()
+                    local sustained = true
+
+                    while relayActive(name) do
+
+                        local duration =
+                            os.clock() - started
+
+                        if duration >= ARRIVAL_HOLD_TIME then
+                            accepted = name
+                            break
+                        end
+
+                        sleep(POLL_INTERVAL)
+                    end
+
+                    if not accepted then
+
+                        local duration =
+                            os.clock() - started
+
+                        term.setTextColor(colors.lightGray)
+
+                        print(
+                            name
+                            .. "  "
+                            .. string.format("%.2f", duration)
+                            .. "s  ignored"
+                        )
+
+                        term.setTextColor(colors.white)
+                    end
+                end
+
+                previous[name] = relayActive(name)
+            end
+        end
+
+        sleep(POLL_INTERVAL)
+    end
+
+    assignedRelays[accepted] = true
+    config.floors[floor].statusRelay = accepted
+
+    term.setTextColor(colors.lime)
+    print()
+    print("ARRIVAL DETECTED")
+    print()
+    print("Floor " .. floor)
+    print("-> " .. accepted)
+
+    term.setTextColor(colors.white)
+
+    -- Wait until the arrival signal releases before moving on.
+    while relayActive(accepted) do
+        sleep(POLL_INTERVAL)
+    end
+
+    waitForEnter()
+end
+
+-- ============================================================
+-- SAVE CONFIG
+-- ============================================================
+
+local function quote(value)
+    return string.format("%q", value)
+end
+
+local file = fs.open(CONFIG_PATH, "w")
+
+if not file then
+    header("Configuration Error")
+
+    term.setTextColor(colors.red)
+    print("Unable to write:")
+    print(CONFIG_PATH)
+
+    term.setTextColor(colors.white)
+    return
+end
+
+file.writeLine("return {")
+file.writeLine("    shaft = " .. quote(config.shaft) .. ",")
+file.writeLine(
+    "    arrivalHoldTime = "
+    .. tostring(config.arrivalHoldTime)
+    .. ","
 )
-
-
--- ============================================================
--- Final displays
--- ============================================================
+file.writeLine("")
+file.writeLine("    floors = {")
 
 for floor = 1, FLOOR_COUNT do
 
-    local mon =
-        peripheral.wrap(
-            floors[floor].monitor
-        )
+    local data = config.floors[floor]
 
-    showCentered(
-        mon,
-        "FLOOR " .. floor,
-        colors.lime
+    file.writeLine("        [" .. floor .. "] = {")
+    file.writeLine(
+        "            monitor = "
+        .. quote(data.monitor)
+        .. ","
     )
+    file.writeLine(
+        "            speaker = "
+        .. quote(data.speaker)
+        .. ","
+    )
+    file.writeLine(
+        "            statusRelay = "
+        .. quote(data.statusRelay)
+        .. ","
+    )
+    file.writeLine("        },")
 end
 
+file.writeLine("    }")
+file.writeLine("}")
+
+file.close()
 
 -- ============================================================
--- Results
+-- COMPLETE
 -- ============================================================
 
-clearTerminal()
-
-print("Commissioning Complete")
-print("======================")
-print()
-print("Lift Shaft: " .. shaft)
-print()
-
+header("Commissioning Complete")
 
 for floor = 1, FLOOR_COUNT do
 
+    local data = config.floors[floor]
+
+    term.setTextColor(colors.yellow)
     print("Floor " .. floor)
 
-    print(
-        "  Monitor: "
-        .. floors[floor].monitor
-    )
+    term.setTextColor(colors.white)
+    print(" M: " .. data.monitor)
+    print(" S: " .. data.speaker)
+    print(" R: " .. data.statusRelay)
 
-    print(
-        "  Speaker: "
-        .. floors[floor].speaker
-    )
-
+    print()
 end
 
+term.setTextColor(colors.lime)
+print("Configuration saved.")
 
-print()
-print("Configuration saved:")
-print(CONFIG_FILE)
-print()
-print("All landing hardware mapped.")
+term.setTextColor(colors.white)
+print(CONFIG_PATH)
