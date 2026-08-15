@@ -1,5 +1,5 @@
 -- ============================================================
--- RuffHouse Lift Controller v3
+-- RuffHouse Lift Controller v4
 -- MOCK / DISPLAY + AUDIO TEST
 --
 -- Display:
@@ -13,7 +13,8 @@
 --
 -- Audio:
 --   EnderIO SAG Mill tumble while moving
---   Two-note bell on destination floor
+--   All movement audio STOPPED on stop/arrival
+--   Two-note bell on destination floor after movement stops
 --
 -- Uses:
 --   /lift/config.lua
@@ -29,39 +30,27 @@ local FLOOR_COUNT = 6
 -- ============================================================
 
 local TEXT_SCALE = 2
-
--- Animation speed
 local ANIMATION_INTERVAL = 0.25
 
 -- ============================================================
 -- AUDIO SETTINGS
 -- ============================================================
 
--- Movement machinery sound
 local MOVE_SOUND = "enderio:block.sag_mill.tumble"
 local MOVE_VOLUME = 0.5
 local MOVE_PITCH = 0.8
-
--- Initial repeat interval.
--- We can tune this by ear once we hear the SAG Mill sample
--- running through the shaft.
 local MOVE_INTERVAL = 1.5
 
--- Arrival chime
 local ARRIVAL_INSTRUMENT = "bell"
 local ARRIVAL_VOLUME = 3
 local ARRIVAL_PITCH = 12
 
-
 -- ============================================================
--- LOAD CONFIGURATION
+-- LOAD CONFIG
 -- ============================================================
 
 if not fs.exists(CONFIG_FILE) then
-    error(
-        "Lift configuration not found: "
-        .. CONFIG_FILE
-    )
+    error("Lift configuration not found: " .. CONFIG_FILE)
 end
 
 local config = dofile(CONFIG_FILE)
@@ -74,7 +63,6 @@ if not config.floors then
     error("Configuration contains no floor data.")
 end
 
-
 -- ============================================================
 -- STATE
 -- ============================================================
@@ -83,9 +71,11 @@ local state = {
     floor = 1,
     direction = "stopped",
     animationFrame = 1,
-    running = true
-}
+    running = true,
 
+    audioActive = false,
+    audioSuccess = 0
+}
 
 -- ============================================================
 -- PERIPHERAL HELPERS
@@ -95,17 +85,11 @@ local function getMonitor(floor)
 
     local floorConfig = config.floors[floor]
 
-    if not floorConfig then
+    if not floorConfig or not floorConfig.monitor then
         return nil
     end
 
-    if not floorConfig.monitor then
-        return nil
-    end
-
-    return peripheral.wrap(
-        floorConfig.monitor
-    )
+    return peripheral.wrap(floorConfig.monitor)
 end
 
 
@@ -113,19 +97,12 @@ local function getSpeaker(floor)
 
     local floorConfig = config.floors[floor]
 
-    if not floorConfig then
+    if not floorConfig or not floorConfig.speaker then
         return nil
     end
 
-    if not floorConfig.speaker then
-        return nil
-    end
-
-    return peripheral.wrap(
-        floorConfig.speaker
-    )
+    return peripheral.wrap(floorConfig.speaker)
 end
-
 
 -- ============================================================
 -- TERMINAL HELPERS
@@ -140,27 +117,16 @@ local function clearTerminal()
     term.setCursorPos(1, 1)
 end
 
-
 -- ============================================================
--- MONITOR DRAWING HELPERS
+-- MONITOR HELPERS
 -- ============================================================
 
-local function writeCenteredAt(
-    mon,
-    centerX,
-    y,
-    text,
-    colour
-)
+local function writeCenteredAt(mon, centerX, y, text, colour)
 
     local x =
-        math.floor(
-            centerX - (#text / 2)
-        ) + 1
+        math.floor(centerX - (#text / 2)) + 1
 
-    mon.setTextColor(
-        colour or colors.white
-    )
+    mon.setTextColor(colour or colors.white)
 
     mon.setCursorPos(
         math.max(1, x),
@@ -170,15 +136,11 @@ local function writeCenteredAt(
     mon.write(text)
 end
 
-
 -- ============================================================
--- DIRECTION ANIMATION
+-- ARROW ANIMATION
 -- ============================================================
 
-local function getArrowRows(
-    direction,
-    frame
-)
+local function getArrowRows(direction, frame)
 
     if direction == "up" then
 
@@ -236,33 +198,11 @@ local function getArrowRows(
     }
 end
 
-
 -- ============================================================
--- DRAW ONE LANDING DISPLAY
+-- DISPLAY POSITIONING
 -- ============================================================
 
-local function drawDisplay(
-    landingFloor
-)
-
-    local mon =
-        getMonitor(landingFloor)
-
-    if not mon then
-        return
-    end
-
-    mon.setTextScale(TEXT_SCALE)
-    mon.setBackgroundColor(colors.black)
-    mon.clear()
-
-    local w, h =
-        mon.getSize()
-
-
-    -- --------------------------------------------------------
-    -- Horizontal positions
-    -- --------------------------------------------------------
+local function getDisplayPositions(w, h)
 
     local leftCenter =
         math.max(
@@ -276,57 +216,82 @@ local function drawDisplay(
             math.floor(w * 0.72)
         )
 
+    -- --------------------------------------------------------
+    -- VISUAL vertical centre
+    --
+    -- CC monitor glyphs sit above their baseline, so simply
+    -- using the mathematical centre makes the number appear
+    -- too high.
+    --
+    -- Bias the baseline downward by one character row.
+    -- --------------------------------------------------------
+
+    local numberY =
+        math.floor((h + 1) / 2) + 1
+
+    if numberY > h then
+        numberY = h
+    end
+
+    return leftCenter, rightCenter, numberY
+end
+
+-- ============================================================
+-- DRAW ONE LANDING
+-- ============================================================
+
+local function drawDisplay(landingFloor)
+
+    local mon = getMonitor(landingFloor)
+
+    if not mon then
+        return
+    end
+
+    mon.setTextScale(TEXT_SCALE)
+    mon.setBackgroundColor(colors.black)
+    mon.clear()
+
+    local w, h = mon.getSize()
+
+    local leftCenter,
+          rightCenter,
+          numberY =
+        getDisplayPositions(w, h)
 
     -- --------------------------------------------------------
-    -- TRUE vertical centre
-    -- --------------------------------------------------------
-
-    local centerY =
-        math.max(
-            1,
-            math.floor((h + 1) / 2)
-        )
-
-
-    -- --------------------------------------------------------
-    -- Determine floor-number colour
+    -- NUMBER COLOUR
     -- --------------------------------------------------------
 
     local numberColour
 
     if state.direction ~= "stopped" then
 
-        numberColour =
-            colors.orange
+        numberColour = colors.orange
 
     elseif state.floor == landingFloor then
 
-        numberColour =
-            colors.lime
+        numberColour = colors.lime
 
     else
 
-        numberColour =
-            colors.white
-
+        numberColour = colors.white
     end
 
-
     -- --------------------------------------------------------
-    -- Floor number
+    -- FLOOR NUMBER
     -- --------------------------------------------------------
 
     writeCenteredAt(
         mon,
         leftCenter,
-        centerY,
+        numberY,
         tostring(state.floor),
         numberColour
     )
 
-
     -- --------------------------------------------------------
-    -- Animated movement indicator
+    -- MOVEMENT INDICATOR
     -- --------------------------------------------------------
 
     if state.direction ~= "stopped" then
@@ -338,7 +303,7 @@ local function drawDisplay(
             )
 
         local topRow =
-            centerY - 1
+            numberY - 1
 
         for i = 1, 3 do
 
@@ -361,7 +326,6 @@ local function drawDisplay(
     end
 end
 
-
 -- ============================================================
 -- REFRESH ALL DISPLAYS
 -- ============================================================
@@ -373,38 +337,63 @@ local function refreshDisplays()
     end
 end
 
+-- ============================================================
+-- STOP ALL SPEAKERS
+-- ============================================================
+
+local function stopAllSpeakers()
+
+    for floor = 1, FLOOR_COUNT do
+
+        local speaker = getSpeaker(floor)
+
+        if speaker then
+            speaker.stop()
+        end
+    end
+
+    state.audioActive = false
+    state.audioSuccess = 0
+end
 
 -- ============================================================
--- MOVEMENT AUDIO
+-- PLAY MOVEMENT SOUND
 -- ============================================================
 
 local function playMovementSound()
 
+    local successCount = 0
+
     for floor = 1, FLOOR_COUNT do
 
-        local speaker =
-            getSpeaker(floor)
+        local speaker = getSpeaker(floor)
 
         if speaker then
 
-            speaker.playSound(
-                MOVE_SOUND,
-                MOVE_VOLUME,
-                MOVE_PITCH
-            )
+            local success =
+                speaker.playSound(
+                    MOVE_SOUND,
+                    MOVE_VOLUME,
+                    MOVE_PITCH
+                )
+
+            if success then
+                successCount = successCount + 1
+            end
         end
     end
+
+    state.audioActive = true
+    state.audioSuccess = successCount
 end
 
-
 -- ============================================================
--- ARRIVAL AUDIO
+-- ARRIVAL CHIME
 -- ============================================================
 
 local function playArrival(floor)
 
-    local speaker =
-        getSpeaker(floor)
+    local speaker = getSpeaker(floor)
 
     if not speaker then
         return
@@ -425,7 +414,6 @@ local function playArrival(floor)
     )
 end
 
-
 -- ============================================================
 -- TERMINAL UI
 -- ============================================================
@@ -434,7 +422,7 @@ local function drawTerminal()
 
     clearTerminal()
 
-    print("RuffHouse Lift Controller v3")
+    print("RuffHouse Lift Controller v4")
     print("============================")
     print()
 
@@ -443,8 +431,6 @@ local function drawTerminal()
         .. tostring(config.shaft)
     )
 
-    print()
-
     print(
         "Current floor: "
         .. tostring(state.floor)
@@ -452,10 +438,31 @@ local function drawTerminal()
 
     print(
         "State: "
-        .. string.upper(
-            state.direction
-        )
+        .. string.upper(state.direction)
     )
+
+    print()
+
+    if state.direction ~= "stopped" then
+
+        print("Movement audio: ACTIVE")
+
+        print(
+            "Speakers: "
+            .. tostring(state.audioSuccess)
+            .. "/"
+            .. tostring(FLOOR_COUNT)
+        )
+
+    else
+
+        print("Movement audio: STOPPED")
+    end
+
+    print()
+
+    print("Sound:")
+    print(MOVE_SOUND)
 
     print()
     print("MOCK CONTROLS")
@@ -465,22 +472,20 @@ local function drawTerminal()
     print("1-6 : Set current floor")
     print("U   : Moving UP")
     print("D   : Moving DOWN")
-    print("S   : Stop (no chime)")
+    print("S   : Stop immediately")
     print("A   : Arrive + chime")
     print("Q   : Quit")
 
     print()
 end
 
-
 -- ============================================================
--- STATE CONTROL
+-- FLOOR POSITION
 -- ============================================================
 
 local function setFloor(floor)
 
-    if floor < 1
-    or floor > FLOOR_COUNT then
+    if floor < 1 or floor > FLOOR_COUNT then
         return
     end
 
@@ -490,18 +495,61 @@ local function setFloor(floor)
     drawTerminal()
 end
 
+-- ============================================================
+-- START MOVEMENT
+-- ============================================================
 
-local function setDirection(direction)
+local function startMovement(direction)
+
+    -- Kill anything left playing from a previous state.
+    stopAllSpeakers()
 
     state.direction = direction
+    state.animationFrame = 1
+
+    -- IMPORTANT:
+    -- Fire movement audio immediately.
+    -- Do not wait for the audio loop to notice the state.
+    playMovementSound()
+
+    refreshDisplays()
+    drawTerminal()
+end
+
+-- ============================================================
+-- STOP MOVEMENT WITHOUT ARRIVAL CHIME
+-- ============================================================
+
+local function stopMovement()
+
+    -- Audio dies FIRST.
+    stopAllSpeakers()
+
+    state.direction = "stopped"
     state.animationFrame = 1
 
     refreshDisplays()
     drawTerminal()
 end
 
+-- ============================================================
+-- ARRIVAL
+-- ============================================================
 
 local function arrive()
+
+    -- --------------------------------------------------------
+    -- ORDER IS IMPORTANT
+    --
+    -- 1. Kill machinery audio.
+    -- 2. Set stopped state.
+    -- 3. Redraw displays.
+    -- 4. Play destination chime.
+    --
+    -- Never stop speakers after playing the bell.
+    -- --------------------------------------------------------
+
+    stopAllSpeakers()
 
     state.direction = "stopped"
     state.animationFrame = 1
@@ -509,14 +557,11 @@ local function arrive()
     refreshDisplays()
     drawTerminal()
 
-    playArrival(
-        state.floor
-    )
+    playArrival(state.floor)
 end
 
-
 -- ============================================================
--- KEYBOARD INPUT LOOP
+-- INPUT LOOP
 -- ============================================================
 
 local function inputLoop()
@@ -526,8 +571,7 @@ local function inputLoop()
         local _, key =
             os.pullEvent("key")
 
-
-        -- Floors 1-6
+        -- Floors
 
         if key == keys.one then
             setFloor(1)
@@ -547,35 +591,37 @@ local function inputLoop()
         elseif key == keys.six then
             setFloor(6)
 
-
         -- Movement
 
         elseif key == keys.u then
-            setDirection("up")
+            startMovement("up")
 
         elseif key == keys.d then
-            setDirection("down")
+            startMovement("down")
+
+        -- Stop
 
         elseif key == keys.s then
-            setDirection("stopped")
-
+            stopMovement()
 
         -- Arrival
 
         elseif key == keys.a then
             arrive()
 
-
         -- Quit
 
         elseif key == keys.q then
 
+            stopAllSpeakers()
+
+            state.direction = "stopped"
             state.running = false
+
             return
         end
     end
 end
-
 
 -- ============================================================
 -- DISPLAY ANIMATION LOOP
@@ -596,9 +642,7 @@ local function animationLoop()
 
             refreshDisplays()
 
-            sleep(
-                ANIMATION_INTERVAL
-            )
+            sleep(ANIMATION_INTERVAL)
 
         else
 
@@ -606,7 +650,6 @@ local function animationLoop()
         end
     end
 end
-
 
 -- ============================================================
 -- MOVEMENT AUDIO LOOP
@@ -618,11 +661,21 @@ local function movementAudioLoop()
 
         if state.direction ~= "stopped" then
 
-            playMovementSound()
+            -- The first sound was already fired immediately
+            -- by startMovement().
+            --
+            -- Wait before retriggering.
 
-            sleep(
-                MOVE_INTERVAL
-            )
+            sleep(MOVE_INTERVAL)
+
+            -- State may have changed while sleeping.
+            -- CHECK AGAIN before playing anything.
+
+            if state.direction ~= "stopped" then
+
+                playMovementSound()
+                drawTerminal()
+            end
 
         else
 
@@ -631,14 +684,14 @@ local function movementAudioLoop()
     end
 end
 
-
 -- ============================================================
 -- STARTUP
 -- ============================================================
 
+stopAllSpeakers()
+
 refreshDisplays()
 drawTerminal()
-
 
 -- ============================================================
 -- RUN
@@ -650,27 +703,18 @@ parallel.waitForAny(
     movementAudioLoop
 )
 
-
 -- ============================================================
 -- SHUTDOWN
 -- ============================================================
 
 state.running = false
+state.direction = "stopped"
 
-for floor = 1, FLOOR_COUNT do
-
-    local speaker =
-        getSpeaker(floor)
-
-    if speaker then
-        speaker.stop()
-    end
-end
-
+stopAllSpeakers()
 
 clearTerminal()
 
-print("RuffHouse Lift Controller v3")
+print("RuffHouse Lift Controller v4")
 print("============================")
 print()
 print("Controller stopped.")
