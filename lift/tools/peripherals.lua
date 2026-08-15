@@ -1,15 +1,24 @@
 -- ============================================================
 -- RuffHouse Peripheral Scanner v2
 --
--- Lists every peripheral visible to this computer.
--- Uses paged output because CraftOS terminals do not provide
--- useful scrollback for long peripheral lists.
+-- General-purpose CC:Tweaked peripheral scanner.
+--
+-- Features:
+--   - Detects every visible peripheral
+--   - Shows peripheral name and reported type
+--   - Paginates output for CraftOS terminals
+--   - Displays a type summary after the final page
+--
+-- RuffHouse Minecraft-CC
 -- ============================================================
 
-local PAGE_SIZE = 12
+-- Number of peripherals displayed on each page.
+-- Kept deliberately conservative so this works comfortably
+-- on the Advanced Computer terminal.
+local PAGE_SIZE = 10
 
 -- ============================================================
--- HELPERS
+-- TERMINAL HELPERS
 -- ============================================================
 
 local function clearScreen()
@@ -19,10 +28,33 @@ local function clearScreen()
     term.setCursorPos(1, 1)
 end
 
-local function waitForPage()
+
+local function waitForNextPage()
     term.setTextColor(colors.yellow)
+
     print()
     print("ENTER = next page   Q = quit")
+
+    term.setTextColor(colors.white)
+
+    while true do
+        local _, key = os.pullEvent("key")
+
+        if key == keys.enter then
+            return true
+        elseif key == keys.q then
+            return false
+        end
+    end
+end
+
+
+local function waitForSummary()
+    term.setTextColor(colors.yellow)
+
+    print()
+    print("ENTER = summary   Q = quit")
+
     term.setTextColor(colors.white)
 
     while true do
@@ -37,118 +69,203 @@ local function waitForPage()
 end
 
 -- ============================================================
--- SCAN
+-- SCAN PERIPHERALS
 -- ============================================================
 
 local names = peripheral.getNames()
 
 table.sort(names)
 
-local peripherals = {}
+local detected = {}
 local typeCounts = {}
 
 for _, name in ipairs(names) do
-    local peripheralType = peripheral.getType(name) or "unknown"
 
-    table.insert(peripherals, {
+    local peripheralType =
+        peripheral.getType(name) or "unknown"
+
+    detected[#detected + 1] = {
         name = name,
         type = peripheralType
-    })
+    }
 
     typeCounts[peripheralType] =
         (typeCounts[peripheralType] or 0) + 1
 end
 
 -- ============================================================
--- PERIPHERAL PAGES
+-- PAGE CALCULATION
 -- ============================================================
 
-local total = #peripherals
-local totalPages = math.max(1, math.ceil(total / PAGE_SIZE))
+local total = #detected
+
+local totalPages =
+    math.max(
+        1,
+        math.ceil(total / PAGE_SIZE)
+    )
+
+-- ============================================================
+-- DISPLAY PERIPHERAL PAGES
+-- ============================================================
 
 for page = 1, totalPages do
+
     clearScreen()
 
     term.setTextColor(colors.yellow)
     print("RuffHouse Peripheral Scanner")
+
     term.setTextColor(colors.white)
     print("============================")
     print()
 
     print(
         "Peripherals: "
-        .. total
-        .. "    Page "
-        .. page
+        .. tostring(total)
+        .. "   Page "
+        .. tostring(page)
         .. "/"
-        .. totalPages
+        .. tostring(totalPages)
     )
 
     print()
 
-    local first = ((page - 1) * PAGE_SIZE) + 1
-    local last = math.min(first + PAGE_SIZE - 1, total)
+    -- --------------------------------------------------------
+    -- Determine which entries belong on this page.
+    -- --------------------------------------------------------
+
+    local first =
+        ((page - 1) * PAGE_SIZE) + 1
+
+    local last =
+        math.min(
+            first + PAGE_SIZE - 1,
+            total
+        )
+
+    -- --------------------------------------------------------
+    -- No peripherals
+    -- --------------------------------------------------------
 
     if total == 0 then
+
         term.setTextColor(colors.red)
         print("No peripherals detected.")
+
         term.setTextColor(colors.white)
+
     else
+
+        -- ----------------------------------------------------
+        -- Display entries
+        -- ----------------------------------------------------
+
         for i = first, last do
-            local entry = peripherals[i]
+
+            local entry = detected[i]
 
             term.setTextColor(colors.white)
             write(entry.name)
 
-            -- Keep the type visually distinct.
             term.setTextColor(colors.lightGray)
             print("  [" .. entry.type .. "]")
         end
     end
 
+    -- --------------------------------------------------------
+    -- Navigation
+    -- --------------------------------------------------------
+
     if page < totalPages then
-        if not waitForPage() then
+
+        local continue =
+            waitForNextPage()
+
+        if not continue then
+
             clearScreen()
+
+            term.setTextColor(colors.white)
             print("Scanner closed.")
+
+            return
+        end
+
+    else
+
+        -- Last peripheral page.
+        -- Give the user a chance to inspect it before replacing
+        -- the screen with the summary.
+
+        local continue =
+            waitForSummary()
+
+        if not continue then
+
+            clearScreen()
+
+            term.setTextColor(colors.white)
+            print("Scanner closed.")
+
             return
         end
     end
 end
 
 -- ============================================================
--- TYPE SUMMARY
+-- BUILD SORTED TYPE LIST
 -- ============================================================
 
 local types = {}
 
 for peripheralType in pairs(typeCounts) do
-    table.insert(types, peripheralType)
+    types[#types + 1] = peripheralType
 end
 
 table.sort(types)
 
--- Give the summary its own page.
+-- ============================================================
+-- SUMMARY PAGE
+-- ============================================================
+
 clearScreen()
 
 term.setTextColor(colors.yellow)
-print("Peripheral Summary")
+print("RuffHouse Peripheral Summary")
+
 term.setTextColor(colors.white)
-print("==================")
+print("============================")
 print()
 
-print("Total peripherals: " .. total)
+print("Total peripherals: " .. tostring(total))
 print()
 
-for _, peripheralType in ipairs(types) do
-    print(
-        peripheralType
-        .. ": "
-        .. typeCounts[peripheralType]
-    )
+if #types == 0 then
+
+    term.setTextColor(colors.red)
+    print("No peripheral types detected.")
+
+else
+
+    for _, peripheralType in ipairs(types) do
+
+        term.setTextColor(colors.white)
+
+        print(
+            peripheralType
+            .. ": "
+            .. tostring(typeCounts[peripheralType])
+        )
+    end
 end
 
+term.setTextColor(colors.white)
+
 print()
+print("----------------------------")
 
 term.setTextColor(colors.lime)
 print("Scan complete.")
+
 term.setTextColor(colors.white)
