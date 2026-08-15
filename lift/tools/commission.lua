@@ -143,7 +143,6 @@ for floor = 1, FLOOR_COUNT do
     config.floors[floor] = {}
 end
 
--- Keep track of already assigned peripherals.
 local assignedMonitors = {}
 local assignedSpeakers = {}
 local assignedRelays = {}
@@ -205,29 +204,6 @@ local function stopAllSpeakerSounds()
             end)
         end
     end
-end
-
-local function playSpeakerTest(name)
-    local speaker = peripheral.wrap(name)
-
-    if not speaker then
-        return
-    end
-
-    -- Repeat until user answers.
-    parallel.waitForAny(
-
-        function()
-            while true do
-                speaker.playNote("pling", 1, 12)
-                sleep(0.6)
-            end
-        end,
-
-        function()
-            os.pullEvent("speaker_test_stop")
-        end
-    )
 end
 
 -- ============================================================
@@ -333,8 +309,7 @@ local function relayActive(name)
         return false
     end
 
-    -- We do not care which physical side of the relay receives
-    -- the signal. Any powered side means this relay is active.
+    -- Any powered side means this relay is active.
     for _, side in ipairs(relaySides) do
         local ok, value = pcall(function()
             return relay.getInput(side)
@@ -375,15 +350,16 @@ for floor = 1, FLOOR_COUNT do
     print("Push the FLOOR " .. floor)
     print("physical call button.")
     print()
-    print("The lift may trigger short")
-    print("signals while passing floors.")
+    print("Short pass-by signals")
+    print("will be ignored.")
     print()
-    print("Short pulses will be ignored.")
+
     print(
-        "Arrival >= "
+        "Arrival threshold: "
         .. string.format("%.1f", ARRIVAL_HOLD_TIME)
         .. " sec"
     )
+
     print()
 
     term.setTextColor(colors.yellow)
@@ -391,8 +367,7 @@ for floor = 1, FLOOR_COUNT do
 
     term.setTextColor(colors.white)
 
-    -- Avoid treating a signal which was already active when
-    -- commissioning began as a new arrival.
+    -- Make sure we begin from a released state.
     waitForAllRelaysReleased()
 
     local accepted = nil
@@ -410,11 +385,10 @@ for floor = 1, FLOOR_COUNT do
 
                 local active = relayActive(name)
 
-                -- New rising edge.
+                -- Detect rising edge.
                 if active and not previous[name] then
 
                     local started = os.clock()
-                    local sustained = true
 
                     while relayActive(name) do
 
@@ -466,7 +440,7 @@ for floor = 1, FLOOR_COUNT do
 
     term.setTextColor(colors.white)
 
-    -- Wait until the arrival signal releases before moving on.
+    -- Wait for signal release before commissioning next floor.
     while relayActive(accepted) do
         sleep(POLL_INTERVAL)
     end
@@ -510,21 +484,25 @@ for floor = 1, FLOOR_COUNT do
     local data = config.floors[floor]
 
     file.writeLine("        [" .. floor .. "] = {")
+
     file.writeLine(
         "            monitor = "
         .. quote(data.monitor)
         .. ","
     )
+
     file.writeLine(
         "            speaker = "
         .. quote(data.speaker)
         .. ","
     )
+
     file.writeLine(
         "            statusRelay = "
         .. quote(data.statusRelay)
         .. ","
     )
+
     file.writeLine("        },")
 end
 
