@@ -1,5 +1,5 @@
 -- ============================================================
--- RuffHouse Lift Controller v6
+-- RuffHouse Lift Controller v6.1
 -- REAL LIFT STATE / HMI + AUDIO
 --
 -- Display:
@@ -441,6 +441,139 @@ end
 
 
 -- ============================================================
+-- LARGE FLOOR DIGITS
+--
+-- Drawn with monitor background cells so the floor number can
+-- fill the left side without changing TEXT_SCALE and therefore
+-- without disturbing the existing arrow renderer.
+-- ============================================================
+
+local LARGE_DIGITS = {
+    ["1"] = {
+        "010",
+        "110",
+        "010",
+        "010",
+        "111"
+    },
+
+    ["2"] = {
+        "111",
+        "001",
+        "111",
+        "100",
+        "111"
+    },
+
+    ["3"] = {
+        "111",
+        "001",
+        "111",
+        "001",
+        "111"
+    },
+
+    ["4"] = {
+        "101",
+        "101",
+        "111",
+        "001",
+        "001"
+    },
+
+    ["5"] = {
+        "111",
+        "100",
+        "111",
+        "001",
+        "111"
+    },
+
+    ["6"] = {
+        "111",
+        "100",
+        "111",
+        "101",
+        "111"
+    }
+}
+
+
+local function drawLargeDigit(
+    mon,
+    centerX,
+    centerY,
+    digit,
+    colour
+)
+
+    local pattern =
+        LARGE_DIGITS[tostring(digit)]
+
+    if not pattern then
+        return
+    end
+
+
+    local digitWidth = 3
+    local digitHeight = 5
+
+    local startX =
+        math.floor(
+            centerX - (digitWidth / 2)
+        ) + 1
+
+    local startY =
+        math.floor(
+            centerY - (digitHeight / 2)
+        )
+
+
+    mon.setBackgroundColor(colour)
+    mon.setTextColor(colour)
+
+
+    for row = 1, digitHeight do
+
+        local line =
+            pattern[row]
+
+        for col = 1, digitWidth do
+
+            if line:sub(col, col) == "1" then
+
+                local x =
+                    startX + col - 1
+
+                local y =
+                    startY + row - 1
+
+
+                local w, h =
+                    mon.getSize()
+
+
+                if x >= 1
+                and x <= w
+                and y >= 1
+                and y <= h then
+
+                    mon.setCursorPos(x, y)
+                    mon.write(" ")
+                end
+            end
+        end
+    end
+
+
+    -- Restore the normal black monitor background for arrows
+    -- and any later drawing operations.
+
+    mon.setBackgroundColor(colors.black)
+end
+
+
+-- ============================================================
 -- DRAW ONE LANDING
 -- ============================================================
 
@@ -498,11 +631,11 @@ local function drawDisplay(landingFloor)
     -- FLOOR NUMBER
     -- --------------------------------------------------------
 
-    writeCenteredAt(
+    drawLargeDigit(
         mon,
         leftCenter,
-        numberY,
-        tostring(state.floor),
+        math.floor((h + 1) / 2),
+        state.floor,
         numberColour
     )
 
@@ -663,7 +796,7 @@ local function drawTerminal()
 
 
     print(
-        "RuffHouse Lift Controller v6"
+        "RuffHouse Lift Controller v6.1"
     )
 
     print(
@@ -1551,7 +1684,7 @@ clearTerminal()
 
 
 print(
-    "RuffHouse Lift Controller v6"
+    "RuffHouse Lift Controller v6.1"
 )
 
 print(
