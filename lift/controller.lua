@@ -290,286 +290,334 @@ end
 
 
 -- ============================================================
--- MONITOR HELPERS
--- ============================================================
-
-local function writeCenteredAt(
-    mon,
-    centerX,
-    y,
-    text,
-    colour
-)
-
-    local x =
-        math.floor(
-            centerX - (#text / 2)
-        ) + 1
-
-    mon.setTextColor(
-        colour or colors.white
-    )
-
-    mon.setCursorPos(
-        math.max(1, x),
-        y
-    )
-
-    mon.write(text)
-end
-
-
--- ============================================================
--- ARROW ANIMATION
--- ============================================================
-
-local function getArrowRows(
-    direction,
-    frame
-)
-
-    if direction == "up" then
-
-        if frame == 1 then
-
-            return {
-                " ",
-                "^",
-                " "
-            }
-
-        elseif frame == 2 then
-
-            return {
-                "^",
-                "^",
-                " "
-            }
-
-        else
-
-            return {
-                "^",
-                " ",
-                "^"
-            }
-        end
-
-
-    elseif direction == "down" then
-
-        if frame == 1 then
-
-            return {
-                " ",
-                "v",
-                " "
-            }
-
-        elseif frame == 2 then
-
-            return {
-                " ",
-                "v",
-                "v"
-            }
-
-        else
-
-            return {
-                "v",
-                " ",
-                "v"
-            }
-        end
-    end
-
-
-    return {
-        " ",
-        " ",
-        " "
-    }
-end
-
-
--- ============================================================
--- DISPLAY POSITIONING
--- ============================================================
-
-local function getDisplayPositions(w, h)
-
-    local leftCenter =
-        math.max(
-            1,
-            math.floor(w * 0.28)
-        )
-
-    local rightCenter =
-        math.max(
-            1,
-            math.floor(w * 0.72)
-        )
-
-
-    -- --------------------------------------------------------
-    -- VISUAL vertical centre
-    --
-    -- Preserved from Controller V4.
-    --
-    -- CC monitor glyphs sit above their baseline, so simply
-    -- using the mathematical centre makes the number appear
-    -- too high.
-    --
-    -- Bias the baseline downward by one character row.
-    -- --------------------------------------------------------
-
-    local numberY =
-        math.floor((h + 1) / 2) + 1
-
-
-    if numberY > h then
-        numberY = h
-    end
-
-
-    return
-        leftCenter,
-        rightCenter,
-        numberY
-end
-
-
--- ============================================================
--- LARGE FLOOR DIGITS
+-- MONITOR HELPERS / PIXEL HMI
 --
--- Drawn with monitor background cells so the floor number can
--- fill the left side without changing TEXT_SCALE and therefore
--- without disturbing the existing arrow renderer.
+-- CC:Tweaked graphics mode is used here so the floor numeral can
+-- genuinely fill the left half of the landing monitor instead of
+-- being constrained to text-cell dimensions.
+--
+-- State, relay, movement and audio logic are unchanged.
 -- ============================================================
 
-local LARGE_DIGITS = {
+local DIGITS = {
     ["1"] = {
-        "010",
-        "110",
-        "010",
-        "010",
-        "111"
+        "0110",
+        "1110",
+        "0110",
+        "0110",
+        "0110",
+        "0110",
+        "1111"
     },
 
     ["2"] = {
-        "111",
-        "001",
-        "111",
-        "100",
-        "111"
+        "1110",
+        "0011",
+        "0011",
+        "0110",
+        "1100",
+        "1100",
+        "1111"
     },
 
     ["3"] = {
-        "111",
-        "001",
-        "111",
-        "001",
-        "111"
+        "1110",
+        "0011",
+        "0011",
+        "0110",
+        "0011",
+        "0011",
+        "1110"
     },
 
     ["4"] = {
-        "101",
-        "101",
-        "111",
-        "001",
-        "001"
+        "1010",
+        "1010",
+        "1010",
+        "1111",
+        "0010",
+        "0010",
+        "0010"
     },
 
     ["5"] = {
-        "111",
-        "100",
-        "111",
-        "001",
-        "111"
+        "1111",
+        "1100",
+        "1100",
+        "1110",
+        "0011",
+        "0011",
+        "1110"
     },
 
     ["6"] = {
-        "111",
-        "100",
-        "111",
-        "101",
-        "111"
+        "0111",
+        "1100",
+        "1100",
+        "1110",
+        "1011",
+        "1011",
+        "0110"
     }
 }
 
 
-local function drawLargeDigit(
+local function fillRect(
     mon,
-    centerX,
-    centerY,
-    digit,
+    x,
+    y,
+    width,
+    height,
     colour
 )
 
-    local pattern =
-        LARGE_DIGITS[tostring(digit)]
+    for py = y, y + height - 1 do
 
-    if not pattern then
+        for px = x, x + width - 1 do
+
+            mon.setPixel(
+                px,
+                py,
+                colour
+            )
+        end
+    end
+end
+
+
+local function drawPixelDigit(
+    mon,
+    floor,
+    left,
+    top,
+    width,
+    height,
+    colour
+)
+
+    local glyph =
+        DIGITS[tostring(floor)]
+
+    if not glyph then
         return
     end
 
 
-    local digitWidth = 3
-    local digitHeight = 5
+    local glyphW = 4
+    local glyphH = 7
 
-    local startX =
-        math.floor(
-            centerX - (digitWidth / 2)
-        ) + 1
-
-    local startY =
-        math.floor(
-            centerY - (digitHeight / 2)
+    local scale =
+        math.max(
+            1,
+            math.floor(
+                math.min(
+                    width / glyphW,
+                    height / glyphH
+                )
+            )
         )
 
 
-    mon.setBackgroundColor(colour)
-    mon.setTextColor(colour)
+    local drawW =
+        glyphW * scale
+
+    local drawH =
+        glyphH * scale
 
 
-    for row = 1, digitHeight do
+    local startX =
+        left
+        + math.floor(
+            (width - drawW) / 2
+        )
+
+    local startY =
+        top
+        + math.floor(
+            (height - drawH) / 2
+        )
+
+
+    for row = 1, glyphH do
 
         local line =
-            pattern[row]
+            glyph[row]
 
-        for col = 1, digitWidth do
+        for col = 1, glyphW do
 
-            if line:sub(col, col) == "1" then
+            if line:sub(col, col)
+                == "1" then
 
-                local x =
-                    startX + col - 1
-
-                local y =
-                    startY + row - 1
-
-
-                local w, h =
-                    mon.getSize()
-
-
-                if x >= 1
-                and x <= w
-                and y >= 1
-                and y <= h then
-
-                    mon.setCursorPos(x, y)
-                    mon.write(" ")
-                end
+                fillRect(
+                    mon,
+                    startX
+                        + (col - 1) * scale,
+                    startY
+                        + (row - 1) * scale,
+                    scale,
+                    scale,
+                    colour
+                )
             end
         end
     end
+end
 
 
-    -- Restore the normal black monitor background for arrows
-    -- and any later drawing operations.
+local function drawArrow(
+    mon,
+    direction,
+    frame,
+    left,
+    top,
+    width,
+    height,
+    colour
+)
 
-    mon.setBackgroundColor(colors.black)
+    if direction == "stopped" then
+        return
+    end
+
+
+    local cx =
+        left
+        + math.floor(width / 2)
+
+    local cy =
+        top
+        + math.floor(height / 2)
+
+
+    -- Small animation offset preserves the existing "moving"
+    -- feel without touching any state-machine timing.
+
+    local offset =
+        (frame - 1) % 3
+
+
+    if direction == "up" then
+
+        cy = cy - offset
+
+        local half =
+            math.max(
+                3,
+                math.floor(width * 0.22)
+            )
+
+        local headH =
+            math.max(
+                4,
+                math.floor(height * 0.30)
+            )
+
+        local stemW =
+            math.max(
+                2,
+                math.floor(width * 0.12)
+            )
+
+        local stemH =
+            math.max(
+                5,
+                math.floor(height * 0.34)
+            )
+
+
+        for dy = 0, headH - 1 do
+
+            local rowHalf =
+                math.floor(
+                    half * dy
+                    / math.max(
+                        1,
+                        headH - 1
+                    )
+                )
+
+            fillRect(
+                mon,
+                cx - rowHalf,
+                cy - headH + dy,
+                rowHalf * 2 + 1,
+                1,
+                colour
+            )
+        end
+
+
+        fillRect(
+            mon,
+            cx - math.floor(stemW / 2),
+            cy,
+            stemW,
+            stemH,
+            colour
+        )
+
+
+    elseif direction == "down" then
+
+        cy = cy + offset
+
+        local half =
+            math.max(
+                3,
+                math.floor(width * 0.22)
+            )
+
+        local headH =
+            math.max(
+                4,
+                math.floor(height * 0.30)
+            )
+
+        local stemW =
+            math.max(
+                2,
+                math.floor(width * 0.12)
+            )
+
+        local stemH =
+            math.max(
+                5,
+                math.floor(height * 0.34)
+            )
+
+
+        fillRect(
+            mon,
+            cx - math.floor(stemW / 2),
+            cy - stemH,
+            stemW,
+            stemH,
+            colour
+        )
+
+
+        for dy = 0, headH - 1 do
+
+            local rowHalf =
+                math.floor(
+                    half
+                    * (headH - 1 - dy)
+                    / math.max(
+                        1,
+                        headH - 1
+                    )
+                )
+
+            fillRect(
+                mon,
+                cx - rowHalf,
+                cy + dy,
+                rowHalf * 2 + 1,
+                1,
+                colour
+            )
+        end
+    end
 end
 
 
@@ -577,105 +625,108 @@ end
 -- DRAW ONE LANDING
 -- ============================================================
 
-local function drawDisplay(landingFloor)
-
-    local mon =
-        getMonitor(landingFloor)
+local function drawDisplay(
+    mon,
+    landingFloor
+)
 
     if not mon then
         return
     end
 
 
-    mon.setTextScale(TEXT_SCALE)
-    mon.setBackgroundColor(colors.black)
-    mon.clear()
+    -- Graphics mode gives us true monitor pixels.
+    -- setTextScale(0.5) maximises the framebuffer resolution.
+
+    pcall(
+        mon.setTextScale,
+        0.5
+    )
+
+    local ok =
+        pcall(
+            mon.setGraphicsMode,
+            1
+        )
+
+    if not ok then
+        error(
+            "Monitor graphics mode unavailable."
+        )
+    end
 
 
     local w, h =
         mon.getSize()
 
 
-    local leftCenter,
-          rightCenter,
-          numberY =
-        getDisplayPositions(w, h)
+    -- Clear framebuffer to black.
+
+    fillRect(
+        mon,
+        0,
+        0,
+        w,
+        h,
+        colors.black
+    )
 
 
-    -- --------------------------------------------------------
-    -- NUMBER COLOUR
-    -- --------------------------------------------------------
-
-    local numberColour
+    local divider =
+        math.floor(w / 2)
 
 
-    if state.direction ~= "stopped" then
+    -- Floor number colour:
+    --
+    -- Lime only when physically stopped at this landing.
+    -- White while moving or when this is not the occupied floor.
 
-        numberColour =
-            colors.orange
+    local numberColour =
+        colors.white
 
-    elseif state.positionKnown
+
+    if state.positionKnown
+    and state.direction == "stopped"
     and state.floor == landingFloor then
 
         numberColour =
             colors.lime
-
-    else
-
-        numberColour =
-            colors.white
     end
 
 
-    -- --------------------------------------------------------
-    -- FLOOR NUMBER
-    -- --------------------------------------------------------
+    -- Leave a little breathing room around each half.
 
-    drawLargeDigit(
+    local margin =
+        math.max(
+            2,
+            math.floor(h * 0.08)
+        )
+
+
+    drawPixelDigit(
         mon,
-        leftCenter,
-        math.floor((h + 1) / 2),
         state.floor,
+        margin,
+        margin,
+        divider - (margin * 2),
+        h - (margin * 2),
         numberColour
     )
 
 
-    -- --------------------------------------------------------
-    -- MOVEMENT INDICATOR
-    -- --------------------------------------------------------
+    if state.direction
+        ~= "stopped" then
 
-    if state.direction ~= "stopped" then
-
-        local arrows =
-            getArrowRows(
-                state.direction,
-                state.animationFrame
-            )
-
-
-        local topRow =
-            numberY - 1
-
-
-        for i = 1, 3 do
-
-            local row =
-                topRow + (i - 1)
-
-
-            if row >= 1
-            and row <= h
-            and arrows[i] ~= " " then
-
-                writeCenteredAt(
-                    mon,
-                    rightCenter,
-                    row,
-                    arrows[i],
-                    colors.orange
-                )
-            end
-        end
+        drawArrow(
+            mon,
+            state.direction,
+            state.animationFrame,
+            divider,
+            margin,
+            w - divider - margin,
+            h - (margin * 2),
+            colors.orange
+        )
     end
 end
 
