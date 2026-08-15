@@ -1,5 +1,5 @@
 -- ============================================================
--- RuffHouse Lift Controller v7.1
+-- RuffHouse Lift Controller v7.2
 -- REAL LIFT STATE / HMI + AUDIO
 --
 -- Display:
@@ -23,8 +23,8 @@
 --   This controller observes LiftLink state and drives HMI/audio.
 --
 -- Shaft orientation:
---   1 -> 6 = DOWN
---   6 -> 1 = UP
+--   1 -> 6 = UP
+--   6 -> 1 = DOWN
 --
 -- The controller NEVER commands the lift.
 -- Physical call buttons remain entirely human controlled.
@@ -451,7 +451,7 @@ local function drawDisplay(landingFloor)
 
     local shortName,
           longName =
-        getFloorLabels(state.floor)
+        getFloorLabels(landingFloor)
 
 
     writeCenteredAt(
@@ -638,7 +638,7 @@ local function drawTerminal()
 
 
     print(
-        "RuffHouse Lift Controller v7.1"
+        "RuffHouse Lift Controller v7.2"
     )
 
     print(
@@ -912,11 +912,11 @@ end
 -- Neither is used to identify RuffHouse Floor 1..6.
 --
 -- The shaft's physical orientation is:
---   RuffHouse 1 -> 6 = DOWN
+--   RuffHouse 1 -> 6 = UP
 --
--- Therefore Create floors are sorted by Y descending:
---   highest Y = RuffHouse Floor 1
---   lowest  Y = RuffHouse Floor 6
+-- Therefore Create floors are sorted by Y ascending:
+--   lowest  Y = RuffHouse Floor 1
+--   highest Y = RuffHouse Floor 6
 -- ============================================================
 
 local function buildFloorMap(createFloors)
@@ -950,7 +950,7 @@ local function buildFloorMap(createFloors)
     table.sort(
         ordered,
         function(a, b)
-            return a.y > b.y
+            return a.y < b.y
         end
     )
 
@@ -1197,7 +1197,7 @@ local function stateLoop()
 
 
                 -- Create Y increases upward.
-                -- RuffHouse 1 -> 6 is downward.
+                -- RuffHouse 1 -> 6 is upward.
 
                 if type(info.speed) == "number"
                 and info.speed ~= 0 then
@@ -1218,10 +1218,10 @@ local function stateLoop()
                 and state.positionKnown then
 
                     if state.destination > state.floor then
-                        direction = "down"
+                        direction = "up"
 
                     elseif state.destination < state.floor then
-                        direction = "up"
+                        direction = "down"
                     end
                 end
 
@@ -1454,7 +1454,7 @@ clearTerminal()
 
 
 print(
-    "RuffHouse Lift Controller v7.1"
+    "RuffHouse Lift Controller v7.2"
 )
 
 print(
