@@ -1,14 +1,16 @@
 -- ============================================================
--- RuffHouse Lift Commissioning Tool v1.5
+-- RuffHouse Lift Commissioning Tool v2.0
 -- CC:Tweaked
 --
 -- Configures:
 --   - Shaft ID
 --   - Floor monitor
 --   - Floor speaker
+--   - Floor call/destination relay
 --   - Floor arrival/status relay
 --
--- Monitor + speaker commissioning is preserved from V1.3.
+-- Monitor + speaker commissioning logic is preserved from V1.3.
+-- Adds combined call + status relay commissioning.
 --
 -- Saves:
 --   /lift/config.lua
@@ -416,9 +418,21 @@ end
 
 
 -- ============================================================
--- REDSTONE STATUS COMMISSIONING
--- New in V1.4
--- V1.5 removes manual ENTER arming
+-- REDSTONE CALL + STATUS COMMISSIONING
+--
+-- One physical floor-button press commissions BOTH:
+--
+--   callRelay:
+--     First NEW relay activation after the prompt.
+--
+--   statusRelay:
+--     A different relay which remains HIGH for at least
+--     ARRIVAL_HOLD_TIME.
+--
+-- Relays already HIGH when a floor test begins are ignored
+-- until they first return LOW. This prevents the lift's
+-- current parked-floor status relay being mistaken for either
+-- the call relay or the destination status relay.
 -- ============================================================
 
 local RELAY_SIDES = {
@@ -489,7 +503,44 @@ local function drawStatusPrompt(
 end
 
 
-local function commissionStatusRelay(
+local function drawTwoLineStatusPrompt(
+    mon,
+    floor,
+    line1,
+    line2,
+    colour1,
+    colour2
+)
+
+    prepareMonitor(mon)
+
+    local _, h = mon.getSize()
+    local centre = math.ceil(h / 2)
+
+    centerText(
+        mon,
+        "FLOOR " .. floor,
+        math.max(1, centre - 2),
+        colors.white
+    )
+
+    centerText(
+        mon,
+        line1,
+        centre,
+        colour1 or colors.orange
+    )
+
+    centerText(
+        mon,
+        line2,
+        math.min(h, centre + 2),
+        colour2 or colors.orange
+    )
+end
+
+
+local function commissionFloorRelays(
     floor,
     shaft,
     monitorName,
@@ -509,17 +560,46 @@ local function commissionStatusRelay(
     print("Shaft: " .. shaft)
     print("Floor: " .. floor)
     print()
-    print("STATUS RELAY SETUP")
+    print("CALL + STATUS RELAY SETUP")
     print()
     print("Push the physical Floor " .. floor)
     print("call button.")
     print()
     print(
-        "Signals under "
+        "Status signals under "
         .. ARRIVAL_HOLD_TIME
         .. "s are treated as PASS."
     )
     print()
+
+
+    -- --------------------------------------------------------
+    -- Snapshot relays which are already HIGH.
+    --
+    -- The lift may be parked at a floor when this phase starts.
+    -- Those signals are ignored until they return LOW.
+    -- --------------------------------------------------------
+
+    local ignoreUntilLow = {}
+
+    for _, relayName in ipairs(relayNames) do
+
+        if not assignedRelays[relayName]
+        and relayActive(relayName) then
+
+            ignoreUntilLow[relayName] = true
+        end
+    end
+
+
+    -- Detection is live BEFORE the prompt is shown.
+
+    local callRelay = nil
+    local statusRelay = nil
+    local statusDuration = nil
+
+    local activeSince = {}
+    local wasActive = {}
 
 
     drawStatusPrompt(
@@ -530,38 +610,13 @@ local function commissionStatusRelay(
     )
 
 
-    -- ========================================================
-    -- Detection is LIVE immediately.
-    --
-    -- The physical call button is not connected to CC.
-    -- CC therefore does not wait for or detect the button.
-    --
-    -- Instead, it watches all currently-unassigned status
-    -- relays from this point onward.
-    --
-    -- Short HIGH  = passing floor
-    -- Sustained HIGH = arrived/stopped floor
-    -- ========================================================
-
-    print("Watching status relays...")
+    print("Watching call + status relays...")
     print()
 
 
-    local activeSince = {}
-
-    local acceptedRelay = nil
-    local acceptedDuration = nil
-
-
-    while acceptedRelay == nil do
+    while statusRelay == nil do
 
         for _, relayName in ipairs(relayNames) do
-
-            -- Once a relay has been assigned to an earlier
-            -- floor, ignore it completely.
-            --
-            -- This is important because the relay may remain
-            -- HIGH while the lift is parked at that floor.
 
             if not assignedRelays[relayName] then
 
@@ -569,105 +624,184 @@ local function commissionStatusRelay(
                     relayActive(relayName)
 
 
-                if active then
+                -- ------------------------------------------------
+                -- Relay was already HIGH when this floor test began.
+                -- Ignore it completely until it first returns LOW.
+                -- ------------------------------------------------
 
-                    -- First observation of HIGH.
+                if ignoreUntilLow[relayName] then
 
-                    if not activeSince[relayName] then
+                    if not active then
 
-                        activeSince[relayName] =
-                            os.clock()
-
+                        ignoreUntilLow[relayName] = nil
+                        wasActive[relayName] = false
+                        activeSince[relayName] = nil
                     end
 
 
-                    local duration =
-                        os.clock()
-                        - activeSince[relayName]
+                else
+
+                    -- ---------------------------------------------
+                    -- NEW rising edge
+                    -- ---------------------------------------------
+
+                    if active
+                    and not wasActive[relayName] then
+
+                        wasActive[relayName] = true
+                        activeSince[relayName] = os.clock()
 
 
-                    -- Sustained signal = lift stopped here.
+                        -- The first NEW relay activation after the
+                        -- prompt is the physical call-button signal.
 
-                    if duration >= ARRIVAL_HOLD_TIME then
+                        if callRelay == nil then
 
-                        acceptedRelay =
-                            relayName
+                            callRelay = relayName
 
-                        acceptedDuration =
-                            duration
+                            term.setTextColor(colors.lime)
+                            print(
+                                "CALL DETECTED: "
+                                .. callRelay
+                            )
+                            term.setTextColor(colors.white)
 
-                        break
 
+                            drawTwoLineStatusPrompt(
+                                mon,
+                                floor,
+                                "CALL OK",
+                                "WAITING FOR LIFT",
+                                colors.lime,
+                                colors.orange
+                            )
+                        end
                     end
 
 
-                elseif activeSince[relayName] then
-
-                    -- Relay went HIGH then LOW before reaching
-                    -- the arrival threshold.
+                    -- ---------------------------------------------
+                    -- Active status candidate
                     --
-                    -- That's a pass-by pulse.
+                    -- The call relay is excluded from status
+                    -- detection after it has been identified.
+                    -- ---------------------------------------------
 
-                    local duration =
-                        os.clock()
-                        - activeSince[relayName]
+                    if active
+                    and relayName ~= callRelay
+                    and activeSince[relayName] then
 
-
-                    term.setTextColor(
-                        colors.lightGray
-                    )
-
-                    print(
-                        relayName
-                        .. "  "
-                        .. string.format(
-                            "%.2f",
-                            duration
-                        )
-                        .. "s  PASS"
-                    )
-
-                    term.setTextColor(
-                        colors.white
-                    )
+                        local duration =
+                            os.clock()
+                            - activeSince[relayName]
 
 
-                    activeSince[relayName] = nil
+                        if duration >= ARRIVAL_HOLD_TIME then
 
+                            statusRelay = relayName
+                            statusDuration = duration
+                            break
+                        end
+                    end
+
+
+                    -- ---------------------------------------------
+                    -- Falling edge
+                    -- ---------------------------------------------
+
+                    if not active
+                    and wasActive[relayName] then
+
+                        local duration = 0
+
+                        if activeSince[relayName] then
+
+                            duration =
+                                os.clock()
+                                - activeSince[relayName]
+                        end
+
+
+                        if relayName ~= callRelay
+                        and duration < ARRIVAL_HOLD_TIME then
+
+                            term.setTextColor(
+                                colors.lightGray
+                            )
+
+                            print(
+                                relayName
+                                .. "  "
+                                .. string.format(
+                                    "%.2f",
+                                    duration
+                                )
+                                .. "s  PASS"
+                            )
+
+                            term.setTextColor(
+                                colors.white
+                            )
+                        end
+
+
+                        wasActive[relayName] = false
+                        activeSince[relayName] = nil
+                    end
                 end
             end
         end
 
 
-        if acceptedRelay == nil then
+        if statusRelay == nil then
 
             sleep(
                 RELAY_POLL_INTERVAL
             )
-
         end
     end
 
 
-    -- ========================================================
-    -- Arrival confirmed
-    -- ========================================================
+    -- --------------------------------------------------------
+    -- Both mappings must exist and must be different.
+    -- --------------------------------------------------------
 
-    assignedRelays[acceptedRelay] = true
+    if callRelay == nil then
+
+        error(
+            "Status detected for Floor "
+            .. floor
+            .. " before a call relay was captured."
+        )
+    end
+
+
+    if callRelay == statusRelay then
+
+        error(
+            "Call and status relay resolved to the same peripheral "
+            .. callRelay
+        )
+    end
+
+
+    assignedRelays[callRelay] = true
+    assignedRelays[statusRelay] = true
 
 
     term.setTextColor(colors.lime)
 
     print()
-    print("ARRIVAL DETECTED")
+    print("CALL + STATUS DETECTED")
     print()
+    print("Call:   " .. callRelay)
 
     print(
-        acceptedRelay
+        "Status: "
+        .. statusRelay
         .. " >= "
         .. string.format(
             "%.2f",
-            acceptedDuration
+            statusDuration
         )
         .. "s"
     )
@@ -678,25 +812,51 @@ local function commissionStatusRelay(
     drawStatusPrompt(
         mon,
         floor,
-        "STATUS OK",
+        "CALL + STATUS OK",
         colors.lime
     )
 
 
-    -- DO NOT wait for this relay to go LOW.
-    --
-    -- It can remain HIGH while the lift is parked here.
-    -- Since it is now assigned, the next floor ignores it.
+    -- Let the success state remain visible.
 
-    sleep(0.8)
+    sleep(1.5)
 
-    return acceptedRelay
+
+    -- --------------------------------------------------------
+    -- Human navigation prompt.
+    -- --------------------------------------------------------
+
+    if floor < FLOOR_COUNT then
+
+        drawTwoLineStatusPrompt(
+            mon,
+            floor,
+            "FLOOR COMPLETE",
+            "PROCEED TO F" .. (floor + 1),
+            colors.lime,
+            colors.orange
+        )
+
+    else
+
+        drawTwoLineStatusPrompt(
+            mon,
+            floor,
+            "FLOOR COMPLETE",
+            "COMMISSIONING COMPLETE",
+            colors.lime,
+            colors.lime
+        )
+    end
+
+
+    return callRelay, statusRelay
 end
 
 
 -- ============================================================
 -- Save configuration
--- V1.3 structure + statusRelay
+-- V1.3 structure + callRelay + statusRelay
 -- ============================================================
 
 local function saveConfig(
@@ -751,6 +911,12 @@ local function saveConfig(
         file.writeLine(
             '            speaker = "'
             .. floors[floor].speaker
+            .. '",'
+        )
+
+        file.writeLine(
+            '            callRelay = "'
+            .. floors[floor].callRelay
             .. '",'
         )
 
@@ -816,7 +982,7 @@ print(
     "Relays:   "
     .. #relayNames
     .. "/"
-    .. FLOOR_COUNT
+    .. (FLOOR_COUNT * 2)
 )
 
 print()
@@ -868,14 +1034,14 @@ if #speakerNames ~= FLOOR_COUNT then
 end
 
 
-if #relayNames ~= FLOOR_COUNT then
+if #relayNames ~= (FLOOR_COUNT * 2) then
 
     print("ERROR")
     print()
 
     print(
         "Expected "
-        .. FLOOR_COUNT
+        .. (FLOOR_COUNT * 2)
         .. " redstone relays."
     )
 
@@ -964,14 +1130,46 @@ for floor = 1, FLOOR_COUNT do
         colors.lime
     )
 
-    sleep(0.5)
+    sleep(1.0)
+
+
+    -- --------------------------------------------------------
+    -- Human navigation prompt.
+    --
+    -- Monitor + speaker for THIS floor are now complete.
+    -- Do not interrupt the monitor -> speaker sequence above.
+    -- --------------------------------------------------------
+
+    if floor < FLOOR_COUNT then
+
+        showCentered(
+            mon,
+            "PROCEED TO F" .. (floor + 1),
+            colors.orange
+        )
+
+    else
+
+        drawTwoLineStatusPrompt(
+            mon,
+            floor,
+            "MON + AUDIO COMPLETE",
+            "RETURN TO FLOOR 1",
+            colors.lime,
+            colors.orange
+        )
+    end
 end
 
 
 -- ============================================================
--- Commission floor status relays
+-- Commission floor call + status relays
 --
 -- Runs only AFTER the known-good V1.3 monitor/speaker pass.
+--
+-- The same physical call-button press maps:
+--   - callRelay immediately
+--   - statusRelay when the lift arrives
 -- ============================================================
 
 local assignedRelays = {}
@@ -979,8 +1177,9 @@ local assignedRelays = {}
 
 for floor = 1, FLOOR_COUNT do
 
-    local statusRelayName =
-        commissionStatusRelay(
+    local callRelayName,
+          statusRelayName =
+        commissionFloorRelays(
             floor,
             shaft,
             floors[floor].monitor,
@@ -988,6 +1187,9 @@ for floor = 1, FLOOR_COUNT do
             assignedRelays
         )
 
+
+    floors[floor].callRelay =
+        callRelayName
 
     floors[floor].statusRelay =
         statusRelayName
@@ -1048,6 +1250,11 @@ for floor = 1, FLOOR_COUNT do
     print(
         "  Speaker: "
         .. floors[floor].speaker
+    )
+
+    print(
+        "  Call:    "
+        .. floors[floor].callRelay
     )
 
     print(
