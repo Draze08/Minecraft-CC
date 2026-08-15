@@ -1,5 +1,5 @@
 -- ============================================================
--- RuffHouse Lift Controller v2
+-- RuffHouse Lift Controller v3
 -- MOCK / DISPLAY + AUDIO TEST
 --
 -- Display:
@@ -12,8 +12,8 @@
 --   ORANGE = lift moving
 --
 -- Audio:
---   Movement pulse on ALL floors
---   Arrival chime on destination floor only
+--   EnderIO SAG Mill tumble while moving
+--   Two-note bell on destination floor
 --
 -- Uses:
 --   /lift/config.lua
@@ -30,20 +30,24 @@ local FLOOR_COUNT = 6
 
 local TEXT_SCALE = 2
 
--- Animation speed in seconds
+-- Animation speed
 local ANIMATION_INTERVAL = 0.25
 
 -- ============================================================
 -- AUDIO SETTINGS
 -- ============================================================
 
--- Movement sound
-local MOVE_INTERVAL = 0.75
-local MOVE_INSTRUMENT = "basedrum"
-local MOVE_VOLUME = 1
-local MOVE_PITCH = 6
+-- Movement machinery sound
+local MOVE_SOUND = "enderio:block.sag_mill.tumble"
+local MOVE_VOLUME = 0.5
+local MOVE_PITCH = 0.8
 
--- Arrival sound
+-- Initial repeat interval.
+-- We can tune this by ear once we hear the SAG Mill sample
+-- running through the shaft.
+local MOVE_INTERVAL = 1.5
+
+-- Arrival chime
 local ARRIVAL_INSTRUMENT = "bell"
 local ARRIVAL_VOLUME = 3
 local ARRIVAL_PITCH = 12
@@ -180,6 +184,7 @@ local function getArrowRows(
 
         if frame == 1 then
             return {
+                " ",
                 "^",
                 " "
             }
@@ -187,11 +192,13 @@ local function getArrowRows(
         elseif frame == 2 then
             return {
                 "^",
-                "^"
+                "^",
+                " "
             }
 
         else
             return {
+                "^",
                 " ",
                 "^"
             }
@@ -201,18 +208,21 @@ local function getArrowRows(
 
         if frame == 1 then
             return {
+                " ",
                 "v",
                 " "
             }
 
         elseif frame == 2 then
             return {
+                " ",
                 "v",
                 "v"
             }
 
         else
             return {
+                "v",
                 " ",
                 "v"
             }
@@ -220,6 +230,7 @@ local function getArrowRows(
     end
 
     return {
+        " ",
         " ",
         " "
     }
@@ -241,40 +252,44 @@ local function drawDisplay(
         return
     end
 
-
     mon.setTextScale(TEXT_SCALE)
     mon.setBackgroundColor(colors.black)
     mon.clear()
-
 
     local w, h =
         mon.getSize()
 
 
     -- --------------------------------------------------------
-    -- Split monitor into left/right regions
+    -- Horizontal positions
     -- --------------------------------------------------------
 
     local leftCenter =
-        math.floor(w * 0.28)
+        math.max(
+            1,
+            math.floor(w * 0.28)
+        )
 
     local rightCenter =
-        math.floor(w * 0.72)
+        math.max(
+            1,
+            math.floor(w * 0.72)
+        )
 
 
     -- --------------------------------------------------------
-    -- Vertical centre
+    -- TRUE vertical centre
     -- --------------------------------------------------------
 
     local centerY =
         math.max(
             1,
-            math.ceil(h / 2)
+            math.floor((h + 1) / 2)
         )
 
 
     -- --------------------------------------------------------
-    -- Determine floor number colour
+    -- Determine floor-number colour
     -- --------------------------------------------------------
 
     local numberColour
@@ -322,35 +337,27 @@ local function drawDisplay(
                 state.animationFrame
             )
 
-        local firstRow =
-            math.max(
-                1,
-                centerY - 1
-            )
+        local topRow =
+            centerY - 1
 
-        local secondRow =
-            math.min(
-                h,
-                centerY + 1
-            )
+        for i = 1, 3 do
 
+            local row =
+                topRow + (i - 1)
 
-        writeCenteredAt(
-            mon,
-            rightCenter,
-            firstRow,
-            arrows[1],
-            colors.orange
-        )
+            if row >= 1
+            and row <= h
+            and arrows[i] ~= " " then
 
-
-        writeCenteredAt(
-            mon,
-            rightCenter,
-            secondRow,
-            arrows[2],
-            colors.orange
-        )
+                writeCenteredAt(
+                    mon,
+                    rightCenter,
+                    row,
+                    arrows[i],
+                    colors.orange
+                )
+            end
+        end
     end
 end
 
@@ -368,10 +375,10 @@ end
 
 
 -- ============================================================
--- AUDIO
+-- MOVEMENT AUDIO
 -- ============================================================
 
-local function playMovementPulse()
+local function playMovementSound()
 
     for floor = 1, FLOOR_COUNT do
 
@@ -380,8 +387,8 @@ local function playMovementPulse()
 
         if speaker then
 
-            speaker.playNote(
-                MOVE_INSTRUMENT,
+            speaker.playSound(
+                MOVE_SOUND,
                 MOVE_VOLUME,
                 MOVE_PITCH
             )
@@ -389,6 +396,10 @@ local function playMovementPulse()
     end
 end
 
+
+-- ============================================================
+-- ARRIVAL AUDIO
+-- ============================================================
 
 local function playArrival(floor)
 
@@ -398,9 +409,6 @@ local function playArrival(floor)
     if not speaker then
         return
     end
-
-
-    -- Two-note lift chime
 
     speaker.playNote(
         ARRIVAL_INSTRUMENT,
@@ -426,7 +434,7 @@ local function drawTerminal()
 
     clearTerminal()
 
-    print("RuffHouse Lift Controller v2")
+    print("RuffHouse Lift Controller v3")
     print("============================")
     print()
 
@@ -486,7 +494,6 @@ end
 local function setDirection(direction)
 
     state.direction = direction
-
     state.animationFrame = 1
 
     refreshDisplays()
@@ -520,9 +527,7 @@ local function inputLoop()
             os.pullEvent("key")
 
 
-        -- ----------------------------------------------------
-        -- FLOOR POSITION TEST
-        -- ----------------------------------------------------
+        -- Floors 1-6
 
         if key == keys.one then
             setFloor(1)
@@ -543,9 +548,7 @@ local function inputLoop()
             setFloor(6)
 
 
-        -- ----------------------------------------------------
-        -- MOVEMENT TEST
-        -- ----------------------------------------------------
+        -- Movement
 
         elseif key == keys.u then
             setDirection("up")
@@ -557,17 +560,13 @@ local function inputLoop()
             setDirection("stopped")
 
 
-        -- ----------------------------------------------------
-        -- ARRIVAL TEST
-        -- ----------------------------------------------------
+        -- Arrival
 
         elseif key == keys.a then
             arrive()
 
 
-        -- ----------------------------------------------------
-        -- QUIT
-        -- ----------------------------------------------------
+        -- Quit
 
         elseif key == keys.q then
 
@@ -619,7 +618,7 @@ local function movementAudioLoop()
 
         if state.direction ~= "stopped" then
 
-            playMovementPulse()
+            playMovementSound()
 
             sleep(
                 MOVE_INTERVAL
@@ -642,7 +641,7 @@ drawTerminal()
 
 
 -- ============================================================
--- RUN CONTROLLER
+-- RUN
 -- ============================================================
 
 parallel.waitForAny(
@@ -671,7 +670,7 @@ end
 
 clearTerminal()
 
-print("RuffHouse Lift Controller v2")
+print("RuffHouse Lift Controller v3")
 print("============================")
 print()
 print("Controller stopped.")
