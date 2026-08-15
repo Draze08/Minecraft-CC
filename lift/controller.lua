@@ -1,5 +1,5 @@
 -- ============================================================
--- RuffHouse Lift Controller v6.1
+-- RuffHouse Lift Controller v7.0
 -- REAL LIFT STATE / HMI + AUDIO
 --
 -- Display:
@@ -17,19 +17,10 @@
 --   Two-note bell on destination floor after movement stops
 --
 -- State input:
---   Floor call + status relays commissioned in:
---   /lift/config.lua
+--   CC:LiftLink create_elevator peripheral.
 --
---   CALL relay   = requested destination / movement intent
---   STATUS relay = observed physical lift position
---
--- Status relay behaviour:
---   SHORT activation     = lift passing floor
---   SUSTAINED activation = lift stopped at floor
---
--- Call relay behaviour:
---   Activation selects destination immediately.
---   Direction is derived from current/last known floor to destination.
+--   Create owns elevator movement and physical call buttons.
+--   This controller observes LiftLink state and drives HMI/audio.
 --
 -- Shaft orientation:
 --   1 -> 6 = DOWN
@@ -71,15 +62,10 @@ local ARRIVAL_PITCH = 12
 
 
 -- ============================================================
--- RELAY SETTINGS
+-- LIFTLINK SETTINGS
 -- ============================================================
 
-local RELAY_POLL_INTERVAL = 0.05
-
--- Default only.
--- Commissioning V1 writes the actual value into config.lua.
-
-local DEFAULT_ARRIVAL_HOLD_TIME = 1.0
+local LIFTLINK_POLL_INTERVAL = 0.05
 
 
 -- ============================================================
@@ -112,9 +98,6 @@ if not config.floors then
 end
 
 
-local ARRIVAL_HOLD_TIME =
-    config.arrivalHoldTime
-    or DEFAULT_ARRIVAL_HOLD_TIME
 
 
 -- ============================================================
@@ -152,23 +135,6 @@ for floor = 1, FLOOR_COUNT do
         )
     end
 
-
-    if not floorConfig.callRelay then
-
-        error(
-            "Missing call relay for Floor "
-            .. floor
-        )
-    end
-
-
-    if not floorConfig.statusRelay then
-
-        error(
-            "Missing status relay for Floor "
-            .. floor
-        )
-    end
 end
 
 
@@ -196,6 +162,10 @@ local state = {
 
     audioActive = false,
     audioSuccess = 0,
+
+    elevatorName = nil,
+    createShortName = nil,
+    createLongName = nil,
 
     -- Has the real physical lift position been established?
 
@@ -239,38 +209,6 @@ local function getSpeaker(floor)
 
     return peripheral.wrap(
         floorConfig.speaker
-    )
-end
-
-
-local function getCallRelay(floor)
-
-    local floorConfig =
-        config.floors[floor]
-
-    if not floorConfig
-    or not floorConfig.callRelay then
-        return nil
-    end
-
-    return peripheral.wrap(
-        floorConfig.callRelay
-    )
-end
-
-
-local function getStatusRelay(floor)
-
-    local floorConfig =
-        config.floors[floor]
-
-    if not floorConfig
-    or not floorConfig.statusRelay then
-        return nil
-    end
-
-    return peripheral.wrap(
-        floorConfig.statusRelay
     )
 end
 
@@ -441,136 +379,9 @@ end
 
 
 -- ============================================================
--- LARGE FLOOR DIGITS
---
--- Drawn with monitor background cells so the floor number can
--- fill the left side without changing TEXT_SCALE and therefore
--- without disturbing the existing arrow renderer.
+-- FLOOR NUMBER
+-- Normal CC monitor text.
 -- ============================================================
-
-local LARGE_DIGITS = {
-    ["1"] = {
-        "010",
-        "110",
-        "010",
-        "010",
-        "111"
-    },
-
-    ["2"] = {
-        "111",
-        "001",
-        "111",
-        "100",
-        "111"
-    },
-
-    ["3"] = {
-        "111",
-        "001",
-        "111",
-        "001",
-        "111"
-    },
-
-    ["4"] = {
-        "101",
-        "101",
-        "111",
-        "001",
-        "001"
-    },
-
-    ["5"] = {
-        "111",
-        "100",
-        "111",
-        "001",
-        "111"
-    },
-
-    ["6"] = {
-        "111",
-        "100",
-        "111",
-        "101",
-        "111"
-    }
-}
-
-
-local function drawLargeDigit(
-    mon,
-    centerX,
-    centerY,
-    digit,
-    colour
-)
-
-    local pattern =
-        LARGE_DIGITS[tostring(digit)]
-
-    if not pattern then
-        return
-    end
-
-
-    local digitWidth = 3
-    local digitHeight = 5
-
-    local startX =
-        math.floor(
-            centerX - (digitWidth / 2)
-        ) + 1
-
-    local startY =
-        math.floor(
-            centerY - (digitHeight / 2)
-        )
-
-
-    mon.setBackgroundColor(colour)
-    mon.setTextColor(colour)
-
-
-    for row = 1, digitHeight do
-
-        local line =
-            pattern[row]
-
-        for col = 1, digitWidth do
-
-            if line:sub(col, col) == "1" then
-
-                local x =
-                    startX + col - 1
-
-                local y =
-                    startY + row - 1
-
-
-                local w, h =
-                    mon.getSize()
-
-
-                if x >= 1
-                and x <= w
-                and y >= 1
-                and y <= h then
-
-                    mon.setCursorPos(x, y)
-                    mon.write(" ")
-                end
-            end
-        end
-    end
-
-
-    -- Restore the normal black monitor background for arrows
-    -- and any later drawing operations.
-
-    mon.setBackgroundColor(colors.black)
-end
 
 
 -- ============================================================
@@ -631,11 +442,11 @@ local function drawDisplay(landingFloor)
     -- FLOOR NUMBER
     -- --------------------------------------------------------
 
-    drawLargeDigit(
+    writeCenteredAt(
         mon,
         leftCenter,
-        math.floor((h + 1) / 2),
-        state.floor,
+        numberY,
+        tostring(state.floor),
         numberColour
     )
 
@@ -796,7 +607,7 @@ local function drawTerminal()
 
 
     print(
-        "RuffHouse Lift Controller v6.1"
+        "RuffHouse Lift Controller v7.0"
     )
 
     print(
@@ -882,32 +693,25 @@ local function drawTerminal()
 
     print()
 
-    print("CALL + STATUS MODE")
-    print("----------------")
+    print("CREATE LIFTLINK MODE")
+    print("--------------------")
     print()
 
     print(
-        "Arrival threshold: "
-        .. tostring(
-            ARRIVAL_HOLD_TIME
-        )
-        .. "s"
+        "Peripheral: "
+        .. tostring(state.elevatorName or "UNKNOWN")
+    )
+
+    print(
+        "Create label: "
+        .. tostring(state.createShortName or "")
+        .. " | "
+        .. tostring(state.createLongName or "")
     )
 
     print()
-
-    print(
-        "Call relays provide destination intent."
-    )
-
-    print(
-        "Status relays provide physical position."
-    )
-
-    print(
-        "Controller observes only; buttons control lift."
-    )
-
+    print("Create owns movement and call buttons.")
+    print("Controller observes only.")
     print()
 
     print("Q : Quit")
@@ -1032,256 +836,168 @@ end
 
 
 -- ============================================================
--- RELAY INPUT
+-- CREATE / CC:LIFTLINK
 -- ============================================================
 
-local RELAY_SIDES = {
-    "top",
-    "bottom",
-    "left",
-    "right",
-    "front",
-    "back"
-}
+local function discoverElevator()
 
+    local names = peripheral.getNames()
+    table.sort(names)
 
-local function peripheralRelayActive(relay)
+    for _, name in ipairs(names) do
 
-    if not relay then
-        return false
-    end
+        if peripheral.hasType(
+            name,
+            "create_elevator"
+        ) then
 
+            local candidate =
+                peripheral.wrap(name)
 
-    for _, side
-        in ipairs(RELAY_SIDES) do
+            local ok, floors =
+                pcall(candidate.listFloors)
 
-        local ok,
-              value =
-            pcall(
-                relay.getInput,
-                side
-            )
+            if ok
+            and type(floors) == "table"
+            and #floors == FLOOR_COUNT then
 
-
-        if ok and value then
-            return true
+                return name, candidate
+            end
         end
     end
 
-
-    return false
-end
-
-
-local function statusRelayActive(floor)
-
-    return peripheralRelayActive(
-        getStatusRelay(floor)
-    )
-end
-
-
-local function callRelayActive(floor)
-
-    return peripheralRelayActive(
-        getCallRelay(floor)
-    )
+    return nil, nil
 end
 
 
 -- ============================================================
--- MOVEMENT DIRECTION FROM DESTINATION INTENT
+-- PHYSICAL FLOOR MAP
 --
--- IMPORTANT:
--- Shaft numbering is physically inverted relative to the words:
+-- Create labels are presentation data only.
 --
---   1 -> 6 = DOWN
---   6 -> 1 = UP
+-- shortName may be G, B1, etc.
+-- longName may be Foyer, Lab, etc.
 --
--- Direction is therefore established immediately from the
--- current/last known physical floor and the call destination.
+-- Neither is used to identify RuffHouse Floor 1..6.
+--
+-- The shaft's physical orientation is:
+--   RuffHouse 1 -> 6 = DOWN
+--
+-- Therefore Create floors are sorted by Y descending:
+--   highest Y = RuffHouse Floor 1
+--   lowest  Y = RuffHouse Floor 6
 -- ============================================================
 
-local function directionToDestination(destination)
+local function buildFloorMap(createFloors)
 
-    local referenceFloor = nil
+    local ordered = {}
 
+    for _, info in ipairs(createFloors) do
 
-    if state.positionKnown then
+        if type(info.y) ~= "number" then
+            error(
+                "LiftLink floor has no numeric Y coordinate."
+            )
+        end
 
-        referenceFloor =
-            state.floor
-
-    elseif state.lastObservedFloor then
-
-        referenceFloor =
-            state.lastObservedFloor
+        table.insert(ordered, info)
     end
 
 
-    if referenceFloor == nil then
-        return nil
-    end
+    if #ordered ~= FLOOR_COUNT then
 
-
-    if destination > referenceFloor then
-
-        return "down"
-
-    elseif destination < referenceFloor then
-
-        return "up"
-    end
-
-
-    return nil
-end
-
-
--- ============================================================
--- CALL EVENT
---
--- A physical landing button has selected a destination.
--- This is intent only. The controller does NOT command the lift.
--- ============================================================
-
-local function handleCall(destination)
-
-    if destination < 1
-    or destination > FLOOR_COUNT then
-        return
-    end
-
-
-    state.destination =
-        destination
-
-
-    local direction =
-        directionToDestination(
-            destination
+        error(
+            "Expected "
+            .. FLOOR_COUNT
+            .. " Create elevator floors; found "
+            .. #ordered
+            .. "."
         )
-
-
-    if direction then
-
-        startMovement(direction)
-
-    else
-
-        -- Same-floor call, or position not yet known.
-        --
-        -- If position is unknown we retain the destination and
-        -- let status observations establish physical position.
-
-        refreshDisplays()
-        drawTerminal()
     end
-end
 
 
--- ============================================================
--- PASS EVENT
---
--- Status relay released before the sustained-arrival threshold.
---
--- Direction is NOT inferred here anymore. Call relays already
--- gave us destination intent before movement began.
---
--- Passing status relays only update actual observed position.
--- ============================================================
-
-local function handlePass(floor)
-
-    state.floor = floor
-    state.positionKnown = true
-
-    state.lastObservedFloor =
-        floor
-
-
-    -- If the controller started with unknown position but a call
-    -- destination was already captured, the first observed status
-    -- floor now gives us enough information to establish direction.
-
-    if state.direction == "stopped"
-    and state.destination then
-
-        local direction =
-            directionToDestination(
-                state.destination
-            )
-
-        if direction then
-            startMovement(direction)
-            return
+    table.sort(
+        ordered,
+        function(a, b)
+            return a.y > b.y
         end
-    end
+    )
 
 
-    refreshDisplays()
-    drawTerminal()
-end
-
-
--- ============================================================
--- INITIAL PHYSICAL POSITION
---
--- When the controller starts, the lift may already be parked
--- at a floor.
---
--- That floor's status relay will already be HIGH.
---
--- We use that to establish initial state WITHOUT playing the
--- arrival chime.
--- ============================================================
-
-local function initialisePosition()
-
-    local activeFloors = {}
-
+    local byY = {}
 
     for floor = 1, FLOOR_COUNT do
 
-        if statusRelayActive(floor) then
+        byY[ordered[floor].y] = floor
+    end
 
-            table.insert(
-                activeFloors,
-                floor
-            )
+
+    return byY
+end
+
+
+local function floorFromY(y)
+
+    if type(y) ~= "number" then
+        return nil
+    end
+
+    return createFloorByY[y]
+end
+
+
+local function readLiftLink()
+
+    local floors =
+        elevator.listFloors()
+
+    local currentFloor = nil
+    local targetFloor = nil
+
+    local currentInfo = nil
+    local targetInfo = nil
+
+
+    for _, info in ipairs(floors) do
+
+        if info.isCurrent then
+
+            currentFloor =
+                floorFromY(info.y)
+
+            currentInfo =
+                info
+        end
+
+
+        if info.isTarget then
+
+            targetFloor =
+                floorFromY(info.y)
+
+            targetInfo =
+                info
         end
     end
 
 
-    if #activeFloors == 1 then
+    local moving =
+        elevator.isMoving()
 
-        local floor =
-            activeFloors[1]
-
-
-        state.floor = floor
-        state.positionKnown = true
-
-        state.lastObservedFloor =
-            floor
-
-        state.direction =
-            "stopped"
+    local speed =
+        elevator.getSpeed()
 
 
-        return floor
-    end
+    return {
+        currentFloor = currentFloor,
+        targetFloor = targetFloor,
 
+        currentInfo = currentInfo,
+        targetInfo = targetInfo,
 
-    -- No active relay:
-    --
-    -- Controller may have started while the lift was moving.
-    -- Position will become known from the next observed relay.
-
-    state.positionKnown = false
-    state.lastObservedFloor = nil
-
-    return nil
+        moving = moving,
+        speed = speed
+    }
 end
 
 
@@ -1291,250 +1007,179 @@ end
 
 local function stateLoop()
 
-    -- --------------------------------------------------------
-    -- Per-floor STATUS relay state.
-    -- --------------------------------------------------------
-
-    local statusState = {}
+    local wasMoving = false
+    local lastCurrentFloor = nil
 
 
-    for floor = 1, FLOOR_COUNT do
+    -- Initial state comes directly from Create.
+    -- Do not play an arrival chime on controller startup.
 
-        statusState[floor] = {
+    local initial =
+        readLiftLink()
 
-            wasActive = false,
 
-            activeSince = nil,
+    if initial.currentFloor then
 
-            handledArrival = false,
+        state.floor =
+            initial.currentFloor
 
-            ignoreUntilLow = false
-        }
+        state.positionKnown = true
+
+        state.lastObservedFloor =
+            initial.currentFloor
+
+        lastCurrentFloor =
+            initial.currentFloor
     end
 
 
-    -- --------------------------------------------------------
-    -- Per-floor CALL relay edge state.
-    --
-    -- Calls are handled on their rising edge only.
-    -- --------------------------------------------------------
+    if initial.currentInfo then
 
-    local callState = {}
+        state.createShortName =
+            initial.currentInfo.shortName
+            or initial.currentInfo.name
+            or ""
 
-
-    for floor = 1, FLOOR_COUNT do
-
-        callState[floor] = {
-
-            wasActive =
-                callRelayActive(floor)
-        }
+        state.createLongName =
+            initial.currentInfo.longName
+            or ""
     end
 
 
-    -- --------------------------------------------------------
-    -- Establish startup physical position from STATUS only.
-    -- --------------------------------------------------------
-
-    local initialFloor =
-        initialisePosition()
-
-
-    if initialFloor then
-
-        statusState[
-            initialFloor
-        ].wasActive = true
-
-        statusState[
-            initialFloor
-        ].ignoreUntilLow = true
-    end
+    state.destination =
+        initial.targetFloor
 
 
     refreshDisplays()
     drawTerminal()
 
 
-    -- --------------------------------------------------------
-    -- Watch both commissioned relay banks.
-    -- --------------------------------------------------------
-
     while state.running do
 
-        -- ====================================================
-        -- CALL RELAYS
-        -- ====================================================
-
-        for floor = 1, FLOOR_COUNT do
-
-            local cs =
-                callState[floor]
-
-            local active =
-                callRelayActive(floor)
+        local ok, info =
+            pcall(readLiftLink)
 
 
-            if active
-            and not cs.wasActive then
+        if ok and info then
 
-                cs.wasActive = true
+            if info.currentFloor then
 
-                handleCall(floor)
+                state.floor =
+                    info.currentFloor
 
+                state.positionKnown =
+                    true
 
-            elseif not active
-            and cs.wasActive then
+                state.lastObservedFloor =
+                    info.currentFloor
 
-                cs.wasActive = false
-            end
-        end
-
-
-        -- ====================================================
-        -- STATUS RELAYS
-        -- ====================================================
-
-        for floor = 1, FLOOR_COUNT do
-
-            local rs =
-                statusState[floor]
-
-
-            local active =
-                statusRelayActive(floor)
-
-
-            -- =================================================
-            -- STATUS RELAY WENT HIGH
-            -- =================================================
-
-            if active
-            and not rs.wasActive then
-
-                rs.wasActive = true
-
-                rs.activeSince =
-                    os.clock()
-
-                rs.handledArrival =
-                    false
+                lastCurrentFloor =
+                    info.currentFloor
             end
 
 
-            -- =================================================
-            -- STATUS RELAY IS HIGH
-            -- =================================================
+            if info.currentInfo then
 
-            if active then
+                state.createShortName =
+                    info.currentInfo.shortName
+                    or info.currentInfo.name
+                    or ""
 
-                if rs.ignoreUntilLow then
-
-                    -- Startup parked-floor relay.
-                    -- It established initial position and must
-                    -- not generate a fake arrival.
-
-                elseif rs.activeSince
-                and not rs.handledArrival then
-
-                    local duration =
-                        os.clock()
-                        - rs.activeSince
+                state.createLongName =
+                    info.currentInfo.longName
+                    or ""
+            end
 
 
-                    if duration
-                        >= ARRIVAL_HOLD_TIME then
+            if info.targetFloor then
 
-                        rs.handledArrival =
-                            true
-
-
-                        local wasMoving =
-                            state.direction
-                            ~= "stopped"
+                state.destination =
+                    info.targetFloor
+            end
 
 
-                        state.floor = floor
-                        state.positionKnown = true
+            if info.moving then
 
-                        state.lastObservedFloor =
-                            floor
+                local direction = nil
 
 
-                        -- A sustained status signal is authoritative
-                        -- physical arrival. If we had a destination,
-                        -- it is now complete.
+                -- Create Y increases upward.
+                -- RuffHouse 1 -> 6 is downward.
 
-                        if wasMoving then
+                if type(info.speed) == "number"
+                and info.speed ~= 0 then
 
-                            arrive(floor)
-
-                        else
-
-                            stopAllSpeakers()
-
-                            state.direction =
-                                "stopped"
-
-                            state.destination =
-                                nil
-
-                            state.animationFrame =
-                                1
-
-                            refreshDisplays()
-                            drawTerminal()
-                        end
+                    if info.speed > 0 then
+                        direction = "up"
+                    else
+                        direction = "down"
                     end
                 end
 
 
-            -- =================================================
-            -- STATUS RELAY IS LOW
-            -- =================================================
+                -- Fallback while Create reports zero speed at the
+                -- beginning/end of a movement transition.
+
+                if not direction
+                and state.destination
+                and state.positionKnown then
+
+                    if state.destination > state.floor then
+                        direction = "down"
+
+                    elseif state.destination < state.floor then
+                        direction = "up"
+                    end
+                end
+
+
+                if direction then
+
+                    if not wasMoving
+                    or state.direction ~= direction then
+
+                        startMovement(direction)
+                    end
+                end
+
+
+                wasMoving = true
+
 
             else
 
-                if rs.wasActive then
+                if wasMoving then
 
-                    if rs.ignoreUntilLow then
-
-                        rs.ignoreUntilLow =
-                            false
-
-
-                    elseif rs.activeSince
-                    and not rs.handledArrival then
-
-                        local duration =
-                            os.clock()
-                            - rs.activeSince
+                    local arrivalFloor =
+                        info.currentFloor
+                        or lastCurrentFloor
+                        or state.destination
 
 
-                        if duration
-                            < ARRIVAL_HOLD_TIME then
-
-                            handlePass(floor)
-                        end
+                    if arrivalFloor then
+                        arrive(arrivalFloor)
+                    else
+                        stopMovement()
                     end
 
 
-                    rs.wasActive =
-                        false
+                elseif state.direction ~= "stopped" then
 
-                    rs.activeSince =
-                        nil
-
-                    rs.handledArrival =
-                        false
+                    stopMovement()
                 end
+
+
+                wasMoving = false
+                state.destination = nil
             end
+
+
+            refreshDisplays()
+            drawTerminal()
         end
 
 
-        sleep(
-            RELAY_POLL_INTERVAL
-        )
+        sleep(LIFTLINK_POLL_INTERVAL)
     end
 end
 
@@ -1650,11 +1295,41 @@ end
 -- STARTUP
 -- ============================================================
 
+
+local elevatorName,
+      elevator =
+    discoverElevator()
+
+
+if not elevator then
+
+    error(
+        "No CC:LiftLink create_elevator peripheral "
+        .. "with exactly "
+        .. FLOOR_COUNT
+        .. " floors found."
+    )
+end
+
+
+state.elevatorName =
+    elevatorName
+
+
+local startupFloors =
+    elevator.listFloors()
+
+
+createFloorByY =
+    buildFloorMap(startupFloors)
+
+
+
 stopAllSpeakers()
 
 
 -- Initial monitor/terminal rendering happens inside stateLoop
--- after the real physical position has been checked.
+-- after LiftLink has supplied the real physical position.
 
 
 -- ============================================================
@@ -1684,7 +1359,7 @@ clearTerminal()
 
 
 print(
-    "RuffHouse Lift Controller v6.1"
+    "RuffHouse Lift Controller v7.0"
 )
 
 print(
