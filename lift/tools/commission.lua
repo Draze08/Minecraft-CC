@@ -1,9 +1,10 @@
 -- ============================================================
--- RuffHouse Lift Commissioning Tool v3.2
+-- RuffHouse Lift Commissioning Tool v3.3
 --
 -- Commissions:
---   1. Floor monitors
---   2. Floor speakers
+--   1. Floor monitor
+--   2. Floor speaker
+--      (monitor + speaker completed per floor)
 --   3. Floor arrival/status relays
 --
 -- The floor monitors provide the local commissioning UI.
@@ -12,11 +13,6 @@
 --   Press the requested floor's physical call button.
 --   Short relay pulses are treated as passing-floor events.
 --   A sustained relay signal is treated as arrival.
---
--- IMPORTANT:
---   A mapped arrival relay may remain HIGH while the lift is
---   parked at that floor. Mapped relays are therefore ignored
---   during subsequent floor commissioning.
 --
 -- RuffHouse Minecraft-CC
 -- ============================================================
@@ -39,7 +35,6 @@ local function clearTerminal()
     term.setCursorPos(1, 1)
 end
 
-
 local function header(title)
     clearTerminal()
 
@@ -51,12 +46,10 @@ local function header(title)
     print()
 end
 
-
 local function waitForEnter()
     term.setTextColor(colors.yellow)
     print()
     print("Press ENTER to continue")
-
     term.setTextColor(colors.white)
 
     while true do
@@ -86,7 +79,6 @@ local function getPeripheralsOfType(wantedType)
     return result
 end
 
-
 local monitors =
     getPeripheralsOfType("monitor")
 
@@ -107,15 +99,8 @@ local function prepareMonitor(monitor)
     monitor.clear()
 end
 
-
 local function centeredText(monitor, y, text, colour)
-    local width, height = monitor.getSize()
-
-    if y < 1 then
-        y = 1
-    elseif y > height then
-        y = height
-    end
+    local width, _ = monitor.getSize()
 
     local x =
         math.floor((width - #text) / 2) + 1
@@ -133,7 +118,6 @@ local function centeredText(monitor, y, text, colour)
     monitor.write(text)
 end
 
-
 local function drawFloorTitle(monitor, floor)
     prepareMonitor(monitor)
 
@@ -146,7 +130,6 @@ local function drawFloorTitle(monitor, floor)
         colors.white
     )
 end
-
 
 local function drawTapToMap(monitor, floor)
     drawFloorTitle(monitor, floor)
@@ -161,7 +144,6 @@ local function drawTapToMap(monitor, floor)
     )
 end
 
-
 local function drawMapped(monitor, floor)
     drawFloorTitle(monitor, floor)
 
@@ -174,7 +156,6 @@ local function drawMapped(monitor, floor)
         colors.lime
     )
 end
-
 
 local function drawSpeakerTest(monitor, floor)
     drawFloorTitle(monitor, floor)
@@ -200,9 +181,9 @@ local function drawSpeakerTest(monitor, floor)
 
     monitor.write("NO")
 
-    local yesText = "YES"
-
     monitor.setTextColor(colors.lime)
+
+    local yesText = "YES"
 
     monitor.setCursorPos(
         math.max(1, width - #yesText),
@@ -217,7 +198,6 @@ local function drawSpeakerTest(monitor, floor)
     monitor.setTextColor(colors.white)
 end
 
-
 local function drawSpeakerMapped(monitor, floor)
     drawFloorTitle(monitor, floor)
 
@@ -230,7 +210,6 @@ local function drawSpeakerMapped(monitor, floor)
         colors.lime
     )
 end
-
 
 local function drawPushCall(monitor, floor)
     drawFloorTitle(monitor, floor)
@@ -252,7 +231,6 @@ local function drawPushCall(monitor, floor)
     )
 end
 
-
 local function drawWaiting(monitor, floor)
     drawFloorTitle(monitor, floor)
 
@@ -272,7 +250,6 @@ local function drawWaiting(monitor, floor)
         colors.yellow
     )
 end
-
 
 local function drawStatusMapped(monitor, floor)
     drawFloorTitle(monitor, floor)
@@ -364,10 +341,44 @@ local assignedSpeakers = {}
 local assignedRelays = {}
 
 -- ============================================================
--- MONITOR COMMISSIONING
+-- SPEAKER HELPERS
+-- ============================================================
+
+local function stopAllSpeakers()
+    for _, name in ipairs(speakers) do
+
+        local speaker =
+            peripheral.wrap(name)
+
+        if speaker then
+            pcall(function()
+                speaker.stop()
+            end)
+        end
+    end
+end
+
+-- ============================================================
+-- FLOOR HARDWARE COMMISSIONING
+--
+-- IMPORTANT:
+--
+-- Each landing is completed before moving to the next:
+--
+-- Floor 1 monitor
+-- Floor 1 speaker
+-- Floor 2 monitor
+-- Floor 2 speaker
+-- ...
+--
+-- This preserves the original physical commissioning workflow.
 -- ============================================================
 
 for floor = 1, FLOOR_COUNT do
+
+    -- ========================================================
+    -- MONITOR
+    -- ========================================================
 
     header(
         "Floor "
@@ -384,10 +395,11 @@ for floor = 1, FLOOR_COUNT do
     print()
     print("Waiting for touch...")
 
-    -- Every currently unassigned monitor displays the
-    -- floor we're looking for.
+    -- Every currently-unassigned monitor displays the
+    -- floor we're currently looking for.
 
     for _, name in ipairs(monitors) do
+
         if not assignedMonitors[name] then
 
             local monitor =
@@ -453,38 +465,16 @@ for floor = 1, FLOOR_COUNT do
 
                 term.setTextColor(colors.white)
 
-                sleep(1)
+                sleep(0.5)
 
                 break
             end
         end
     end
-end
 
--- ============================================================
--- SPEAKER HELPERS
--- ============================================================
-
-local function stopAllSpeakers()
-
-    for _, name in ipairs(speakers) do
-
-        local speaker =
-            peripheral.wrap(name)
-
-        if speaker then
-            pcall(function()
-                speaker.stop()
-            end)
-        end
-    end
-end
-
--- ============================================================
--- SPEAKER COMMISSIONING
--- ============================================================
-
-for floor = 1, FLOOR_COUNT do
+    -- ========================================================
+    -- SPEAKER
+    -- ========================================================
 
     local monitorName =
         config.floors[floor].monitor
@@ -550,7 +540,6 @@ for floor = 1, FLOOR_COUNT do
             end
         end
 
-
         local function touchLoop()
 
             while true do
@@ -580,7 +569,6 @@ for floor = 1, FLOOR_COUNT do
                 end
             end
         end
-
 
         parallel.waitForAny(
             soundLoop,
@@ -620,13 +608,14 @@ for floor = 1, FLOOR_COUNT do
         true
 
     if monitor then
+
         drawSpeakerMapped(
             monitor,
             floor
         )
     end
 
-    sleep(0.8)
+    sleep(0.5)
 end
 
 -- ============================================================
@@ -642,7 +631,6 @@ local relaySides = {
     "back"
 }
 
-
 local function relayActive(name)
 
     local relay =
@@ -657,7 +645,6 @@ local function relayActive(name)
         local ok,
               value =
             pcall(function()
-
                 return relay.getInput(side)
             end)
 
@@ -669,9 +656,13 @@ local function relayActive(name)
     return false
 end
 
-
 -- ============================================================
 -- STATUS RELAY COMMISSIONING
+--
+-- Already-mapped relays are ignored.
+--
+-- This matters because the arrival signal remains HIGH while
+-- the lift is parked at that floor.
 -- ============================================================
 
 for floor = 1, FLOOR_COUNT do
@@ -719,12 +710,10 @@ for floor = 1, FLOOR_COUNT do
         )
     end
 
-    -- --------------------------------------------------------
-    -- We cannot currently read the call-button channels.
+    -- We don't directly read the call-button channel yet.
     --
-    -- Press the call button physically, then press ENTER
-    -- here to arm the status detector.
-    -- --------------------------------------------------------
+    -- Press the physical button, then ENTER on the computer
+    -- to arm the status detector.
 
     term.setTextColor(colors.yellow)
 
@@ -755,24 +744,18 @@ for floor = 1, FLOOR_COUNT do
     print("Watching status relays...")
     print()
 
-    -- --------------------------------------------------------
-    -- IMPORTANT v3.2 CHANGE
-    --
-    -- We do NOT wait for every relay to be LOW here.
-    --
-    -- A relay which was mapped on an earlier floor may still
-    -- be held HIGH because the lift is physically parked there.
-    --
-    -- Assigned relays are ignored entirely.
-    --
-    -- Any currently-active UNASSIGNED relay is measured from
-    -- the moment detection begins. If it remains HIGH for the
-    -- threshold, it can still be accepted.
-    -- --------------------------------------------------------
-
     local accepted = nil
 
     local activeSince = {}
+
+    -- --------------------------------------------------------
+    -- WATCH UNASSIGNED RELAYS
+    --
+    -- No "wait until every relay is low" stage.
+    --
+    -- A previously-mapped relay can legitimately remain HIGH
+    -- while the lift is parked there.
+    -- --------------------------------------------------------
 
     while not accepted do
 
@@ -783,11 +766,9 @@ for floor = 1, FLOOR_COUNT do
                 local active =
                     relayActive(name)
 
-                -- ------------------------------------------------
-                -- Relay has become active.
-                -- ------------------------------------------------
-
                 if active then
+
+                    -- First time we've seen this relay HIGH.
 
                     if not activeSince[name] then
 
@@ -799,11 +780,11 @@ for floor = 1, FLOOR_COUNT do
                         os.clock()
                         - activeSince[name]
 
-                    -- ------------------------------------------------
-                    -- Sustained signal = arrival / parked here.
-                    -- ------------------------------------------------
+                    -- Sustained signal means the lift has
+                    -- actually stopped at this floor.
 
-                    if duration >= ARRIVAL_HOLD_TIME then
+                    if duration
+                        >= ARRIVAL_HOLD_TIME then
 
                         accepted = name
 
@@ -812,12 +793,10 @@ for floor = 1, FLOOR_COUNT do
 
                 else
 
-                    -- ------------------------------------------------
-                    -- Relay was previously active but released
-                    -- before reaching the arrival threshold.
+                    -- Relay has gone LOW.
                     --
-                    -- Therefore it was a pass-by pulse.
-                    -- ------------------------------------------------
+                    -- If we were timing it, it was a short
+                    -- pass-by pulse.
 
                     if activeSince[name] then
 
@@ -854,32 +833,24 @@ for floor = 1, FLOOR_COUNT do
         end
     end
 
-    -- --------------------------------------------------------
-    -- Map the relay immediately.
-    --
-    -- DO NOT wait for it to release.
-    --
-    -- The signal may remain HIGH for as long as the lift
-    -- remains parked at this floor.
-    -- --------------------------------------------------------
+    -- ========================================================
+    -- ARRIVAL CONFIRMED
+    -- ========================================================
 
-    assignedRelays[accepted] = true
+    local heldDuration =
+        os.clock()
+        - activeSince[accepted]
+
+    assignedRelays[accepted] =
+        true
 
     config.floors[floor].statusRelay =
         accepted
-
-    local acceptedDuration =
-        os.clock()
-        - (
-            activeSince[accepted]
-            or os.clock()
-        )
 
     term.setTextColor(colors.lime)
 
     print()
     print("ARRIVAL DETECTED")
-    print()
 
     print(
         "Floor "
@@ -892,7 +863,7 @@ for floor = 1, FLOOR_COUNT do
         "Held >= "
         .. string.format(
             "%.2f",
-            acceptedDuration
+            heldDuration
         )
         .. "s"
     )
@@ -907,17 +878,15 @@ for floor = 1, FLOOR_COUNT do
         )
     end
 
-    -- --------------------------------------------------------
     -- IMPORTANT:
     --
-    -- Advance immediately.
+    -- DO NOT wait for the accepted relay to release.
     --
-    -- The accepted relay is now in assignedRelays, so it will
-    -- be ignored during commissioning of the next floor even
-    -- if the lift remains parked here and the relay stays HIGH.
-    -- --------------------------------------------------------
+    -- It remains HIGH while the lift is parked at the floor.
+    -- It is now assigned, so subsequent floor commissioning
+    -- simply ignores it.
 
-    sleep(1)
+    sleep(0.8)
 end
 
 -- ============================================================
@@ -932,13 +901,11 @@ local function quote(value)
     )
 end
 
-
 local file =
     fs.open(
         CONFIG_PATH,
         "w"
     )
-
 
 if not file then
 
@@ -954,16 +921,13 @@ if not file then
     return
 end
 
-
 file.writeLine("return {")
-
 
 file.writeLine(
     "    shaft = "
     .. quote(config.shaft)
     .. ","
 )
-
 
 file.writeLine(
     "    arrivalHoldTime = "
@@ -973,14 +937,11 @@ file.writeLine(
     .. ","
 )
 
-
 file.writeLine("")
-
 
 file.writeLine(
     "    floors = {"
 )
-
 
 for floor = 1, FLOOR_COUNT do
 
@@ -1016,7 +977,6 @@ for floor = 1, FLOOR_COUNT do
     )
 end
 
-
 file.writeLine("    }")
 file.writeLine("}")
 
@@ -1051,7 +1011,6 @@ header("Commissioning Complete")
 print("All landing hardware mapped.")
 print()
 
-
 for floor = 1, FLOOR_COUNT do
 
     local data =
@@ -1083,7 +1042,6 @@ for floor = 1, FLOOR_COUNT do
 
     print()
 end
-
 
 term.setTextColor(colors.lime)
 
