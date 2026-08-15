@@ -142,6 +142,11 @@ end
 -- STATE
 -- ============================================================
 
+local elevatorName = nil
+local elevator = nil
+local createFloorByY = nil
+
+
 local state = {
 
     -- Last known / currently observed floor.
@@ -1296,8 +1301,8 @@ end
 -- ============================================================
 
 
-local elevatorName,
-      elevator =
+elevatorName,
+elevator =
     discoverElevator()
 
 
