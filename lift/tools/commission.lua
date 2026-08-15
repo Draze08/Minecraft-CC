@@ -1,5 +1,5 @@
 -- ============================================================
--- RuffHouse Lift Controller v7.2
+-- RuffHouse Lift Controller v7.3
 -- REAL LIFT STATE / HMI + AUDIO
 --
 -- Display:
@@ -34,7 +34,7 @@
 -- ============================================================
 
 local CONFIG_FILE = "/lift/config.lua"
-local FLOOR_COUNT = 6
+local HMI_HMI_FLOOR_COUNT = 0
 
 
 -- ============================================================
@@ -98,13 +98,29 @@ if not config.floors then
 end
 
 
+do
+    local floor = 1
+
+    while config.floors[floor] do
+        HMI_HMI_FLOOR_COUNT = floor
+        floor = floor + 1
+    end
+
+    if HMI_HMI_FLOOR_COUNT == 0 then
+        error(
+            "Configuration contains no commissioned HMI floors."
+        )
+    end
+end
+
+
 
 
 -- ============================================================
 -- VALIDATE CONFIG
 -- ============================================================
 
-for floor = 1, FLOOR_COUNT do
+for floor = 1, HMI_HMI_FLOOR_COUNT do
 
     local floorConfig =
         config.floors[floor]
@@ -173,6 +189,9 @@ local state = {
     elevatorName = nil,
     createShortName = nil,
     createLongName = nil,
+
+    createFloorCount = 0,
+    hmiFloorCount = HMI_HMI_FLOOR_COUNT,
 
     -- Has the real physical lift position been established?
 
@@ -528,7 +547,7 @@ end
 
 local function refreshDisplays()
 
-    for floor = 1, FLOOR_COUNT do
+    for floor = 1, HMI_HMI_FLOOR_COUNT do
         drawDisplay(floor)
     end
 end
@@ -540,7 +559,7 @@ end
 
 local function stopAllSpeakers()
 
-    for floor = 1, FLOOR_COUNT do
+    for floor = 1, HMI_HMI_FLOOR_COUNT do
 
         local speaker =
             getSpeaker(floor)
@@ -565,7 +584,7 @@ local function playMovementSound()
     local successCount = 0
 
 
-    for floor = 1, FLOOR_COUNT do
+    for floor = 1, HMI_HMI_FLOOR_COUNT do
 
         local speaker =
             getSpeaker(floor)
@@ -638,7 +657,7 @@ local function drawTerminal()
 
 
     print(
-        "RuffHouse Lift Controller v7.2"
+        "RuffHouse Lift Controller v7.3"
     )
 
     print(
@@ -705,7 +724,7 @@ local function drawTerminal()
             )
             .. "/"
             .. tostring(
-                FLOOR_COUNT
+                HMI_HMI_FLOOR_COUNT
             )
         )
 
@@ -740,6 +759,28 @@ local function drawTerminal()
         .. tostring(state.createLongName or "")
     )
 
+    print(
+        "Create landings: "
+        .. tostring(state.createFloorCount)
+    )
+
+    print(
+        "Commissioned HMI: "
+        .. tostring(state.hmiFloorCount)
+    )
+
+    if state.createFloorCount
+        ~= state.hmiFloorCount then
+
+        print(
+            "HMI mismatch: "
+            .. tostring(
+                state.createFloorCount
+                - state.hmiFloorCount
+            )
+        )
+    end
+
     print()
     print("Create owns movement and call buttons.")
     print("Controller observes only.")
@@ -756,7 +797,7 @@ end
 local function setFloor(floor)
 
     if floor < 1
-    or floor > FLOOR_COUNT then
+    or floor > HMI_HMI_FLOOR_COUNT then
         return
     end
 
@@ -890,7 +931,7 @@ local function discoverElevator()
 
             if ok
             and type(floors) == "table"
-            and #floors == FLOOR_COUNT then
+            and #floors > 0 then
 
                 return name, candidate
             end
@@ -935,14 +976,9 @@ local function buildFloorMap(createFloors)
     end
 
 
-    if #ordered ~= FLOOR_COUNT then
-
+    if #ordered == 0 then
         error(
-            "Expected "
-            .. FLOOR_COUNT
-            .. " Create elevator floors; found "
-            .. #ordered
-            .. "."
+            "LiftLink returned no elevator floors."
         )
     end
 
@@ -960,10 +996,7 @@ local function buildFloorMap(createFloors)
     local infoByFloor = {}
 
 
-    for floor = 1, FLOOR_COUNT do
-
-        local info =
-            ordered[floor]
+    for floor, info in ipairs(ordered) do
 
         byY[info.y] =
             floor
@@ -979,7 +1012,8 @@ local function buildFloorMap(createFloors)
     return
         byY,
         infoByY,
-        infoByFloor
+        infoByFloor,
+        #ordered
 end
 
 local function floorFromY(y)
@@ -1025,23 +1059,32 @@ local function readLiftLink()
         elevator.listFloors()
 
 
-    -- Refresh Create presentation metadata every poll.
-    -- Floor identity remains Y-based, so labels may be renamed freely.
+    -- --------------------------------------------------------
+    -- Rebuild topology from Y every poll.
+    --
+    -- This keeps the controller modular if Create landings are
+    -- added, removed, or renamed while the system is in service.
+    -- Y remains the physical identity; labels remain presentation.
+    -- --------------------------------------------------------
 
-    for _, info in ipairs(floors) do
+    local byY,
+          infoByY,
+          infoByFloor,
+          createCount =
+        buildFloorMap(floors)
 
-        local floor =
-            floorFromY(info.y)
 
-        if floor then
+    createFloorByY =
+        byY
 
-            createInfoByY[info.y] =
-                info
+    createInfoByY =
+        infoByY
 
-            createInfoByFloor[floor] =
-                info
-        end
-    end
+    createInfoByFloor =
+        infoByFloor
+
+    state.createFloorCount =
+        createCount
 
 
     local currentFloor = nil
@@ -1077,9 +1120,6 @@ local function readLiftLink()
     local moving =
         elevator.isMoving()
 
-    local speed =
-        elevator.getSpeed()
-
 
     return {
         currentFloor = currentFloor,
@@ -1088,8 +1128,7 @@ local function readLiftLink()
         currentInfo = currentInfo,
         targetInfo = targetInfo,
 
-        moving = moving,
-        speed = speed
+        moving = moving
     }
 end
 
@@ -1196,25 +1235,13 @@ local function stateLoop()
                 local direction = nil
 
 
-                -- Create Y increases upward.
-                -- RuffHouse 1 -> 6 is upward.
+                -- Direction is derived from physical landing order.
+                --
+                -- Lowest Y is Floor 1, and floor numbers increase
+                -- upward. No dependence on Create labels or speed
+                -- sign semantics.
 
-                if type(info.speed) == "number"
-                and info.speed ~= 0 then
-
-                    if info.speed > 0 then
-                        direction = "up"
-                    else
-                        direction = "down"
-                    end
-                end
-
-
-                -- Fallback while Create reports zero speed at the
-                -- beginning/end of a movement transition.
-
-                if not direction
-                and state.destination
+                if state.destination
                 and state.positionKnown then
 
                     if state.destination > state.floor then
@@ -1398,9 +1425,7 @@ if not elevator then
 
     error(
         "No CC:LiftLink create_elevator peripheral "
-        .. "with exactly "
-        .. FLOOR_COUNT
-        .. " floors found."
+        .. "with at least one floor found."
     )
 end
 
@@ -1415,7 +1440,8 @@ local startupFloors =
 
 createFloorByY,
 createInfoByY,
-createInfoByFloor =
+createInfoByFloor,
+state.createFloorCount =
     buildFloorMap(startupFloors)
 
 
@@ -1454,7 +1480,7 @@ clearTerminal()
 
 
 print(
-    "RuffHouse Lift Controller v7.2"
+    "RuffHouse Lift Controller v7.3"
 )
 
 print(
